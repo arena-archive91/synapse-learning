@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "./utils/cn";
+import { computeNextInterval } from "./lib/spacedRepetition";
+import { useLearnerModel } from "./store/LearnerModelContext";
 
 // Advanced visual components
 import { BayesianMasteryPosterior } from "./advanced-visuals/BayesianMastery";
@@ -138,6 +140,10 @@ const toolTabs: { id: ToolTab; label: string; desc: string; icon: string }[] = [
   { id: "feynman", label: "Feynman Check", desc: "Explain it simply — AI finds the gaps", icon: "💬" },
   { id: "errorlog", label: "Error Notebook", desc: "Persistent mistake log with root cause", icon: "📕" },
   { id: "pomodoro", label: "Study Timer", desc: "Pomodoro + adaptive session control", icon: "⏱️" },
+  { id: "bayesian", label: "Bayesian Mastery", desc: "Beta posterior with evidence updates", icon: "📈" },
+  { id: "forgetting", label: "Forgetting Curve", desc: "Retention decay + review scheduling", icon: "📉" },
+  { id: "knowledgegraph", label: "Concept Graph", desc: "Draggable prerequisite network", icon: "🕸️" },
+  { id: "calibration", label: "Calibration", desc: "Confidence vs actual performance", icon: "🎯" },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -171,19 +177,20 @@ export default function AdvancedVisualToolsSection({ lang = "en" as Lang }: { la
   };
 
   return (
-    <section className="py-6">
+    <section id="visual-tools" className="py-6" aria-labelledby="visual-tools-heading">
       <Panel>
         <Eyebrow>Advanced visual learning tools</Eyebrow>
-        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-          Patterns, graphs, shapes, and emphatic colors that make learning visible
+        <h2 id="visual-tools-heading" className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+          {t("title")}
         </h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
-          Every visual is driven by the learner model. Color coding reduces cognitive load, shapes reveal structure, and interactive diagrams turn passive reading into active manipulation.
+          {t("desc")}
         </p>
 
-        <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
+        <div className="mt-5 flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Visual learning tools">
           {toolTabs.map((tab) => (
-            <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)}
+            <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
               className={cn("group min-w-[12rem] shrink-0 rounded-2xl border px-4 py-3 text-left transition-all duration-300",
                 activeTab === tab.id ? "border-cyan-300/35 bg-cyan-300/10 shadow-[0_0_24px_rgba(103,232,249,0.08)]" : "border-white/10 bg-white/[0.04] hover:bg-white/[0.07]"
               )}>
@@ -196,7 +203,7 @@ export default function AdvancedVisualToolsSection({ lang = "en" as Lang }: { la
           ))}
         </div>
 
-        <div className="mt-6 motion-safe:animate-[fadeUp_0.4s_ease-out]" key={activeTab}>
+        <div className="mt-6 motion-safe:animate-[fadeUp_0.4s_ease-out]" key={activeTab} role="tabpanel">
           {activeTab === "leitner" && <LeitnerBoxTool />}
           {activeTab === "heatmap" && <MasteryHeatmap />}
           {activeTab === "sankey" && <KnowledgeFlowSankey />}
@@ -212,7 +219,7 @@ export default function AdvancedVisualToolsSection({ lang = "en" as Lang }: { la
            {activeTab === "bayesian" && <BayesianMasteryPosterior alpha={4.2} beta={2.8} label="Loss Aversion (Beta Posterior)" evidence={7} />}
            {activeTab === "forgetting" && <ForgettingCurveSimulator />}
            {activeTab === "knowledgegraph" && <InteractiveKnowledgeGraph />}
-           {activeTab === "calibration" && <ConfidenceCalibrationScatter />}
+           {activeTab === "calibration" && <CalibrationTab />}
          </div>
       </Panel>
     </section>
@@ -220,15 +227,28 @@ export default function AdvancedVisualToolsSection({ lang = "en" as Lang }: { la
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  CALIBRATION TAB — wired to live learner model
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function CalibrationTab() {
+  const { calibration } = useLearnerModel();
+  const points = calibration.map((p) => ({ predicted: p.predicted, actual: p.actual }));
+  return <ConfidenceCalibrationScatter points={points} />;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  1. LEITNER BOX — FSRS-aware spaced repetition with animated card movement
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function LeitnerBoxTool() {
+  const { recordReview } = useLearnerModel();
   const [cards, setCards] = useState(LEITNER_INITIAL);
   const [flipped, setFlipped] = useState<string | null>(null);
   const [filterBox, setFilterBox] = useState<number | null>(null);
-  const [confidence, setConfidence] = useState<number>(60);
+  const [confidenceByCard, setConfidenceByCard] = useState<Record<string, number>>({});
   const [lastAction, setLastAction] = useState<string | null>(null);
+
+  const getConfidence = (id: string) => confidenceByCard[id] ?? 60;
 
   const boxes = useMemo(() => {
     const g: Record<number, LeitnerCard[]> = { 1: [], 2: [], 3: [], 4: [], 5: [] };
@@ -254,15 +274,24 @@ function LeitnerBoxTool() {
   ];
 
   const promote = (id: string) => {
-    setCards((prev) => prev.map((c) => c.id === id ? { ...c, box: Math.min(5, c.box + 1), correct: c.correct + 1, total: c.total + 1, streak: c.streak + 1, lastReview: 0, nextDue: Math.pow(2, c.box) } : c));
+    const confidence = getConfidence(id);
+    setCards((prev) => prev.map((c) => {
+      if (c.id !== id) return c;
+      const newBox = Math.min(5, c.box + 1);
+      const nextDue = computeNextInterval(newBox, confidence, c.streak + 1);
+      return { ...c, box: newBox, correct: c.correct + 1, total: c.total + 1, streak: c.streak + 1, lastReview: 0, nextDue };
+    }));
+    recordReview(id, true, confidence);
     setFlipped(null);
-    setLastAction(`✓ Card promoted — confidence ${confidence}%`);
+    setLastAction(`✓ Promoted to box ${Math.min(5, (cards.find((c) => c.id === id)?.box ?? 1) + 1)} — confidence ${confidence}% → review in ${computeNextInterval(Math.min(5, (cards.find((c) => c.id === id)?.box ?? 1) + 1), confidence, 1)}d`);
   };
 
   const demote = (id: string) => {
-    setCards((prev) => prev.map((c) => c.id === id ? { ...c, box: 1, total: c.total + 1, streak: 0, lastReview: 0, nextDue: 0 } : c));
+    const confidence = getConfidence(id);
+    setCards((prev) => prev.map((c) => c.id === id ? { ...c, box: 1, total: c.total + 1, streak: 0, lastReview: 0, nextDue: 1 } : c));
+    recordReview(id, false, confidence);
     setFlipped(null);
-    setLastAction("✗ Card returned to Box 1 for immediate review");
+    setLastAction(`✗ Returned to Box 1 — low confidence (${confidence}%) triggers immediate re-review`);
   };
 
   const visible = filterBox != null ? (boxes[filterBox] ?? []) : cards;
@@ -331,8 +360,12 @@ function LeitnerBoxTool() {
                   <div className="mt-3 space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-slate-400">Confidence:</span>
-                      <input type="range" min={10} max={100} value={confidence} onChange={(e) => setConfidence(Number(e.target.value))} className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 accent-cyan-300" />
-                      <span className="text-xs font-semibold text-cyan-200">{confidence}%</span>
+                      <input type="range" min={10} max={100} value={getConfidence(card.id)}
+                        onChange={(e) => setConfidenceByCard((prev) => ({ ...prev, [card.id]: Number(e.target.value) }))}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 accent-cyan-300"
+                        aria-label={`Confidence for ${card.front}`} />
+                      <span className="text-xs font-semibold text-cyan-200">{getConfidence(card.id)}%</span>
                     </div>
                     <div className="flex gap-2">
                       <button onClick={(e) => { e.stopPropagation(); promote(card.id); }} className="flex-1 rounded-xl bg-emerald-500/20 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/30">✓ Correct</button>

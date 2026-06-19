@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { cn } from "./utils/cn";
 import AdvancedVisualToolsSection from "./VisualTools";
+import { ReadinessRing } from "./advanced-visuals/ReadinessRing";
+import { useLearnerModel } from "./store/LearnerModelContext";
 
 type Section = "library" | "tasks" | "agent" | "progress" | "settings";
 type Lens = "Theory" | "Practice";
@@ -473,6 +475,20 @@ function App() {
   const [lens, setLens] = useState<Lens>("Theory");
   const [visualMode, setVisualMode] = useState<VisualMode>("concept");
   const [lang, setLang] = useState<Lang>("en");
+  const [toast, setToast] = useState<string | null>(null);
+  const workspaceRef = useRef<HTMLElement | null>(null);
+  const toolsRef = useRef<HTMLElement | null>(null);
+  const sectionsRef = useRef<HTMLElement | null>(null);
+  const { readiness } = useLearnerModel();
+
+  const scrollToRef = (ref: React.RefObject<HTMLElement | null>) => {
+    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const notify = (message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(null), 3200);
+  };
 
   // Bilingual translation helper (EN + EL) — keeps English terminology visible
   const t = (key: string): string => {
@@ -576,11 +592,19 @@ function App() {
             </div>
 
              <div className="flex flex-col gap-3 sm:flex-row">
-               <button className="rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-950 transition-transform duration-300 hover:-translate-y-0.5 hover:bg-cyan-50">
-                 {t("hero.explore")}
+               <button
+                 type="button"
+                 onClick={() => scrollToRef(workspaceRef)}
+                 className="rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-950 transition-transform duration-300 hover:-translate-y-0.5 hover:bg-cyan-50"
+               >
+                 {dict["hero.explore"][lang]}
                </button>
-               <button className="rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition-transform duration-300 hover:-translate-y-0.5 hover:border-cyan-300/40 hover:bg-white/10">
-                 {t("hero.engine")}
+               <button
+                 type="button"
+                 onClick={() => scrollToRef(toolsRef)}
+                 className="rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition-transform duration-300 hover:-translate-y-0.5 hover:border-cyan-300/40 hover:bg-white/10"
+               >
+                 {dict["hero.engine"][lang]}
                </button>
               <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 p-1">
                 {lensOptions.map((option) => (
@@ -673,16 +697,23 @@ function App() {
 
         <VisualLabSection lens={lens} visualMode={visualMode} setVisualMode={setVisualMode} />
 
-        <StudyWorkspaceSection lens={lens} curriculum={curriculum} />
+        <StudyWorkspaceSection lens={lens} curriculum={curriculum} sectionRef={workspaceRef} />
 
-        <AdvancedVisualToolsSection lang={lang} />
+        <div ref={toolsRef}>
+          <AdvancedVisualToolsSection lang={lang} />
+        </div>
 
-        <section className="sticky top-[4.4rem] z-20 -mx-4 border-y border-white/8 bg-slate-950/80 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-           <div className="flex gap-2 overflow-x-auto pb-1">
+        <section
+          ref={sectionsRef}
+          className="sticky top-[4.4rem] z-20 -mx-4 border-y border-white/8 bg-slate-950/80 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+        >
+           <div className="flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Product sections">
              {sections.map((item) => (
                <button
                  key={item.id}
                  type="button"
+                 role="tab"
+                 aria-selected={section === item.id}
                  onClick={() => setSection(item.id)}
                  className={cn(
                    "min-w-[14rem] rounded-2xl border px-4 py-3 text-left transition-all duration-300",
@@ -698,11 +729,11 @@ function App() {
            </div>
         </section>
 
-        <section className="space-y-6 py-6">
-          {section === "library" ? <LibrarySection curriculum={curriculum} /> : null}
-          {section === "tasks" ? <TasksSection curriculum={curriculum} /> : null}
-          {section === "agent" ? <AgentSection curriculum={curriculum} /> : null}
-          {section === "progress" ? <ProgressSection /> : null}
+        <section className="space-y-6 py-6" role="tabpanel">
+          {section === "library" ? <LibrarySection curriculum={curriculum} onAction={notify} /> : null}
+          {section === "tasks" ? <TasksSection curriculum={curriculum} onStart={() => { setSection("agent"); notify("Session started — agent mode activated"); }} /> : null}
+          {section === "agent" ? <AgentSection curriculum={curriculum} onFollowUp={notify} /> : null}
+          {section === "progress" ? <ProgressSection readiness={readiness} /> : null}
           {section === "settings" ? <SettingsSection /> : null}
         </section>
 
@@ -790,11 +821,21 @@ function App() {
 
         <BlueprintSection />
       </div>
+
+      {toast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-6 right-6 z-50 max-w-sm rounded-2xl border border-cyan-300/30 bg-slate-900/95 px-4 py-3 text-sm text-cyan-50 shadow-2xl backdrop-blur"
+        >
+          {toast}
+        </div>
+      ) : null}
     </main>
   );
 }
 
-function LibrarySection({ curriculum }: { curriculum: Curriculum }) {
+function LibrarySection({ curriculum, onAction }: { curriculum: Curriculum; onAction: (msg: string) => void }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
       <Surface className="motion-safe:animate-[fadeUp_0.6s_ease-out]">
@@ -823,7 +864,12 @@ function LibrarySection({ curriculum }: { curriculum: Curriculum }) {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2">
           {curriculum.library.actions.map((action) => (
-            <button key={action} className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-left text-sm text-white transition-colors duration-300 hover:border-cyan-300/25 hover:bg-white/[0.07]">
+            <button
+              key={action}
+              type="button"
+              onClick={() => onAction(`Action queued: ${action}`)}
+              className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-left text-sm text-white transition-colors duration-300 hover:border-cyan-300/25 hover:bg-white/[0.07]"
+            >
               {action}
             </button>
           ))}
@@ -872,7 +918,7 @@ function LibrarySection({ curriculum }: { curriculum: Curriculum }) {
   );
 }
 
-function TasksSection({ curriculum }: { curriculum: Curriculum }) {
+function TasksSection({ curriculum, onStart }: { curriculum: Curriculum; onStart: () => void }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[1.02fr_0.98fr]">
       <Surface className="motion-safe:animate-[fadeUp_0.6s_ease-out]">
@@ -884,11 +930,16 @@ function TasksSection({ curriculum }: { curriculum: Curriculum }) {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
           {curriculum.tasks.sessionModes.map((mode) => (
-            <div key={mode.name} className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+            <button
+              key={mode.name}
+              type="button"
+              onClick={onStart}
+              className="rounded-2xl border border-white/8 bg-white/[0.04] p-4 text-left transition-colors hover:border-cyan-300/25 hover:bg-white/[0.07]"
+            >
               <div className="text-sm font-semibold text-white">{mode.name}</div>
               <div className="mt-1 text-xs uppercase tracking-[0.28em] text-slate-500">{mode.duration}</div>
               <div className="mt-2 text-sm leading-6 text-slate-300">{mode.detail}</div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -946,7 +997,31 @@ function TasksSection({ curriculum }: { curriculum: Curriculum }) {
   );
 }
 
-function AgentSection({ curriculum }: { curriculum: Curriculum }) {
+function AgentSection({ curriculum, onFollowUp }: { curriculum: Curriculum; onFollowUp: (msg: string) => void }) {
+  const { concepts, readiness, calibrationGap } = useLearnerModel();
+  const [extraLines, setExtraLines] = useState<{ speaker: string; text: string }[]>([]);
+
+  const followUpResponses: Record<string, string> = {
+    "Generate 3 similar questions": "Here are 3 transfer questions on framing vs anchoring, grounded in your lecture notes.",
+    "Switch to oral exam": "Oral mode activated — I'll ask one concept at a time and wait for your spoken answer.",
+    "Ask for a simpler explanation": "Think of anchoring as a starting number pulling your estimate; framing is how the same facts are packaged.",
+    "Create an exam answer outline": "Outline: (1) define mechanism, (2) give example, (3) name common mistake, (4) one-sentence contrast.",
+    "Show the next step": "Next: run a 3-item retrieval quiz on loss aversion with confidence rating.",
+    "Give me a tiny hint": "Hint: what changes if the reference point shifts?",
+    "Run a similar problem": "Similar problem loaded — compare two policy frames with identical outcomes.",
+    "Explain the error message": "The error means you treated a heuristic as a bias without naming the systematic deviation.",
+  };
+
+  const handleFollowUp = (item: string) => {
+    const response = followUpResponses[item] ?? `Processing: ${item}`;
+    setExtraLines((prev) => [
+      ...prev,
+      { speaker: "You", text: item },
+      { speaker: "QuillLoop", text: response },
+    ]);
+    onFollowUp(`Agent: ${item}`);
+  };
+
   return (
     <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
       <Surface className="motion-safe:animate-[fadeUp_0.6s_ease-out]">
@@ -976,7 +1051,7 @@ function AgentSection({ curriculum }: { curriculum: Curriculum }) {
           <SectionTitle eyebrow="Conversation" title="Teach, test, and repair in one loop" subtitle="The tutor never stops at the answer. It always generates the next practice step." />
 
           <div className="mt-5 space-y-3">
-            {curriculum.agent.transcript.map((line) => (
+            {[...curriculum.agent.transcript, ...extraLines].map((line) => (
               <div
                 key={`${line.speaker}-${line.text}`}
                 className={cn(
@@ -992,7 +1067,12 @@ function AgentSection({ curriculum }: { curriculum: Curriculum }) {
 
           <div className="mt-5 flex flex-wrap gap-2">
             {curriculum.agent.followUps.map((item) => (
-              <button key={item} className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200 transition-colors duration-300 hover:border-cyan-300/20 hover:bg-white/[0.08]">
+              <button
+                key={item}
+                type="button"
+                onClick={() => handleFollowUp(item)}
+                className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200 transition-colors duration-300 hover:border-cyan-300/20 hover:bg-white/[0.08]"
+              >
                 {item}
               </button>
             ))}
@@ -1007,7 +1087,12 @@ function AgentSection({ curriculum }: { curriculum: Curriculum }) {
           />
 
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            {curriculum.agent.signals.map((signal) => (
+            {[
+              { label: "Mastery", value: `${readiness}%`, note: "Unified across workspace, Leitner, and progress views." },
+              { label: "Confidence", value: `${Math.round(concepts.reduce((s, c) => s + c.confidence, 0) / concepts.length)}%`, note: "Average self-reported confidence from recent reviews." },
+              { label: "Calibration gap", value: `${calibrationGap} pts`, note: "Distance between predicted and actual performance." },
+              { label: "Active concepts", value: `${concepts.length}`, note: "Concepts tracked in the live learner model." },
+            ].map((signal) => (
               <div key={signal.label} className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-semibold text-white">{signal.label}</div>
@@ -1023,7 +1108,9 @@ function AgentSection({ curriculum }: { curriculum: Curriculum }) {
   );
 }
 
-function ProgressSection() {
+function ProgressSection({ readiness }: { readiness: number }) {
+  const { concepts, calibrationGap, retention } = useLearnerModel();
+
   return (
     <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
       <Surface className="motion-safe:animate-[fadeUp_0.6s_ease-out]">
@@ -1035,9 +1122,12 @@ function ProgressSection() {
 
         <div className="mt-6 grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
           <div className="rounded-[28px] border border-white/8 bg-slate-950/35 p-4">
-            <ReadinessRing value={72} label="Exam readiness" description="Source-grounded readiness calculated from first attempts and concept importance." />
+            <ReadinessRing value={readiness} label="Exam readiness" description="Unified readiness from concept mastery and confidence calibration across all tools." />
             <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400">
-              {progressMetrics.slice(0, 2).map((metric) => (
+              {[
+                { label: "Retention", value: `${retention}%` },
+                { label: "Calibration gap", value: `${calibrationGap} pts` },
+              ].map((metric) => (
                 <div key={metric.label} className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
                   <div className="font-semibold text-white">{metric.label}</div>
                   <div className="mt-1 text-cyan-200">{metric.value}</div>
@@ -1258,8 +1348,17 @@ function VisualLabSection({
   );
 }
 
-function StudyWorkspaceSection({ lens, curriculum }: { lens: Lens; curriculum: Curriculum }) {
+function StudyWorkspaceSection({
+  lens,
+  curriculum,
+  sectionRef,
+}: {
+  lens: Lens;
+  curriculum: Curriculum;
+  sectionRef: React.RefObject<HTMLElement | null>;
+}) {
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("map");
+  const { readiness } = useLearnerModel();
 
   const pack = useMemo(() => {
     if (lens === "Theory") {
@@ -1339,7 +1438,7 @@ function StudyWorkspaceSection({ lens, curriculum }: { lens: Lens; curriculum: C
   }, [lens, curriculum]);
 
   return (
-    <section className="py-6">
+    <section id="study-workspace" ref={sectionRef} className="py-6" aria-labelledby="workspace-heading">
       <Surface className="motion-safe:animate-[fadeUp_0.7s_ease-out]">
         <SectionTitle
           eyebrow="Interactive study workspace"
@@ -1387,7 +1486,7 @@ function StudyWorkspaceSection({ lens, curriculum }: { lens: Lens; curriculum: C
                   <div className="text-xs uppercase tracking-[0.28em] text-slate-500">Mini dashboard</div>
                   <div className="mt-1 text-sm font-semibold text-white">Course readiness and weak spots</div>
                 </div>
-                <ReadinessRing value={lens === "Theory" ? 72 : 68} label="Ready" description="A quick readiness snapshot." />
+                <ReadinessRing value={readiness} label="Ready" description="Live readiness from the unified learner model." />
               </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-3">
                 {pack.weakSpots.map((spot: string) => (
@@ -1999,37 +2098,6 @@ function MiniAlert({ title, body, tone }: { title: string; body: string; tone: "
     >
       <div className="text-sm font-semibold">{title}</div>
       <div className="mt-2 text-sm leading-6 text-slate-300">{body}</div>
-    </div>
-  );
-}
-
-function ReadinessRing({ value, label, description }: { value: number; label: string; description: string }) {
-  const radius = 54;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference - (value / 100) * circumference;
-
-  return (
-    <div className="flex flex-col items-center justify-center rounded-[26px] bg-slate-950/30 p-4 text-center">
-      <div className="relative h-36 w-36">
-        <svg viewBox="0 0 140 140" className="h-full w-full -rotate-90">
-          <circle cx="70" cy="70" r={radius} className="fill-none stroke-white/10" strokeWidth="12" />
-          <circle
-            cx="70"
-            cy="70"
-            r={radius}
-            className="fill-none stroke-cyan-300"
-            strokeWidth="12"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={dashOffset}
-          />
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <div className="text-3xl font-semibold text-white">{value}%</div>
-          <div className="mt-1 text-xs uppercase tracking-[0.28em] text-slate-500">{label}</div>
-        </div>
-      </div>
-      <p className="mt-3 max-w-xs text-sm leading-6 text-slate-300">{description}</p>
     </div>
   );
 }
