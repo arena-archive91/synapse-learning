@@ -1,4 +1,5 @@
 import type { Task, AgentMode, MistakeRecord } from '../types';
+import { isSameConcept } from './skillNodes';
 
 export type TaskAction = 'lesson' | 'practical' | 'workspace' | 'agent' | 'tasks-review' | 'tasks-fix' | 'tasks-prereq' | 'exam-prep';
 
@@ -34,11 +35,11 @@ export function getWorkspaceTool(task: Task): WorkspaceToolId {
   return 'concept-map';
 }
 
+/** @deprecated Prefer resolveReviewCards from taskFlowContent with upload context. */
 export function getReviewCards(concept: string): { front: string; back: string }[] {
   return [
-    { front: `Define: ${concept}`, back: `State the definition and key properties of ${concept}.` },
-    { front: `Apply: ${concept}`, back: `How would you use ${concept} in an exam problem? Outline the steps.` },
-    { front: `Compare: ${concept}`, back: `What is ${concept} often confused with? Clarify the difference.` },
+    { front: `Define: ${concept}`, back: `State the definition and key properties of ${concept} from your notes.` },
+    { front: `Apply: ${concept}`, back: `How would you use ${concept} in a problem? Outline the steps.` },
   ];
 }
 
@@ -50,13 +51,8 @@ export function getAgentMode(task: Task): AgentMode {
 }
 
 export function getMistakesForTask(task: Task, mistakes: MistakeRecord[]): MistakeRecord[] {
-  const concept = getTaskConcept(task).toLowerCase();
-  const related = mistakes.filter(
-    (m) =>
-      !m.resolved &&
-      (m.concept.toLowerCase().includes(concept.slice(0, 8)) ||
-        concept.includes(m.concept.toLowerCase().slice(0, 8))),
-  );
+  const concept = getTaskConcept(task);
+  const related = mistakes.filter((m) => !m.resolved && isSameConcept(m.concept, concept));
   if (related.length > 0) return related;
   if (task.category === 'fix') return mistakes.filter((m) => !m.resolved).slice(0, 3);
   return [];
@@ -78,76 +74,28 @@ export function getExamDurationSeconds(estimatedMinutes: number): number {
   return Math.min(Math.max(estimatedMinutes * 6, 90), 300);
 }
 
+/** @deprecated Prefer resolveExamQuestions from taskFlowContent with upload context. */
 export function getExamQuestions(concept: string): ExamQuestion[] {
-  const topic = concept.toLowerCase();
-  if (topic.includes('consumer')) {
-    return [
-      {
-        question: 'A consumer maximizes utility subject to a budget constraint. The optimal bundle satisfies:',
-        options: ['MRS = price ratio', 'MU = 0 for all goods', 'Income = expenditure only at corner', 'Demand is always inelastic'],
-        correctIndex: 0,
-      },
-      {
-        question: 'Indifference curves are convex to the origin because of:',
-        options: ['Increasing marginal utility', 'Diminishing MRS', 'Perfect substitutes', 'Giffen goods'],
-        correctIndex: 1,
-      },
-      {
-        question: 'If income rises and demand for a good falls, the good is:',
-        options: ['Normal', 'Inferior', 'Luxury', 'Veblen'],
-        correctIndex: 1,
-      },
-    ];
-  }
   return [
     {
       question: `Which statement best describes ${concept}?`,
-      options: ['Core definition from your notes', 'Unrelated concept', 'Opposite of the correct idea', 'Only applies in edge cases'],
+      options: ['The definition from your notes', 'An unrelated concept', 'The opposite idea', 'Only true in edge cases'],
       correctIndex: 0,
     },
     {
-      question: `In an exam problem about ${concept}, what should you state first?`,
-      options: ['Assumptions and definitions', 'Final numeric answer', 'Unrelated formula', 'Graph only'],
-      correctIndex: 0,
-    },
-    {
-      question: `A common mistake with ${concept} is:`,
-      options: ['Skipping intermediate steps', 'Always using calculus', 'Ignoring units', 'Drawing a diagram'],
+      question: `In a problem about ${concept}, what should you state first?`,
+      options: ['Assumptions and definitions', 'Final numeric answer only', 'Unrelated formula', 'Graph with no explanation'],
       correctIndex: 0,
     },
   ];
 }
 
+/** @deprecated Prefer resolvePrerequisiteSteps from taskFlowContent with upload context. */
 export function getPrerequisiteSteps(concept: string): PrerequisiteStep[] {
-  const topic = concept.toLowerCase();
-  if (topic.includes('utility') || topic.includes('indifference')) {
-    return [
-      {
-        title: 'What is utility?',
-        body: 'Utility U(x,y) ranks consumption bundles. Higher utility = preferred bundle. Ordinal utility only needs ranking, not cardinal measurement.',
-      },
-      {
-        title: 'Indifference curves',
-        body: 'An indifference curve shows bundles with equal utility. Properties: downward sloping, convex (diminishing MRS), never cross.',
-      },
-      {
-        title: 'Budget constraint',
-        body: 'p₁x₁ + p₂x₂ ≤ m. The slope is −p₁/p₂. Optimum: MRS = p₁/p₂ at the tangency point (interior solution).',
-      },
-      {
-        title: 'Checkpoint',
-        body: 'Before returning to indifference curves, you should be able to explain why convexity reflects diminishing marginal rate of substitution.',
-      },
-    ];
-  }
   return [
     {
       title: `Review: ${concept}`,
       body: `Strengthen the foundational ideas behind ${concept} before tackling dependent topics.`,
-    },
-    {
-      title: 'Key definition',
-      body: 'State the definition in your own words, then connect it to one worked example from your notes.',
     },
     {
       title: 'Checkpoint',
@@ -161,25 +109,22 @@ export function findPendingTask(tasks: Task[], predicate: (t: Task) => boolean):
 }
 
 export function findTaskForRepair(tasks: Task[], repair: { concept: string; prerequisite: string }): Task | undefined {
-  const preKey = repair.prerequisite.toLowerCase().slice(0, 8);
-  const depKey = repair.concept.toLowerCase().slice(0, 8);
   return (
     findPendingTask(
       tasks,
       (t) =>
         t.type === 'prerequisite-repair' &&
-        (getTaskConcept(t).toLowerCase().includes(preKey) ||
-          getTaskConcept(t).toLowerCase().includes(depKey)),
+        (isSameConcept(getTaskConcept(t), repair.prerequisite) ||
+          isSameConcept(getTaskConcept(t), repair.concept)),
     ) ?? findPendingTask(tasks, (t) => t.type === 'prerequisite-repair')
   );
 }
 
 export function findTaskForConcept(tasks: Task[], concept: string): Task | undefined {
-  const key = concept.toLowerCase().slice(0, 8);
   return findPendingTask(
     tasks,
     (t) =>
-      getTaskConcept(t).toLowerCase().includes(key) || t.title.toLowerCase().includes(key),
+      isSameConcept(getTaskConcept(t), concept) || isSameConcept(t.title, concept),
   );
 }
 

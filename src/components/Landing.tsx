@@ -7,7 +7,7 @@ import {
 
 import { ThemeToggle } from './ThemeToggle';
 import { useI18n } from '../lib/i18n';
-import { getLandingContent } from '../lib/domainContent';
+import { getLandingContent } from '../lib/landingContent';
 
 interface LandingProps {
   onGetStarted: () => void;
@@ -36,6 +36,7 @@ export function Landing({ onGetStarted }: LandingProps) {
               <ThemeToggle />
               <button
                 onClick={onGetStarted}
+                data-testid="landing-get-started"
                 className="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg font-medium text-sm transition-all"
               >
                 {content.getStarted}

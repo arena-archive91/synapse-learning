@@ -8,13 +8,18 @@ import {
 import { cn } from '../utils/cn';
 
 import type { UploadPayload } from '../lib/uploadPipeline';
+import type { Course } from '../types';
+import { isDemoCourse } from '../lib/demoMode';
 
 interface UploadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onUpload: (files: File[]) => void;
   onProcessUpload?: (payload: UploadPayload) => Promise<unknown>;
+  /** Called after a successful processUpload with the generated/extended course. */
+  onUploadComplete?: (course: Course) => void;
   onProceed: () => void;
+  courses?: Course[];
 }
 
 const acceptedFormats = [
@@ -28,16 +33,21 @@ const acceptedFormats = [
 
 type SourceMode = 'strict' | 'enriched' | 'notes-only';
 
-export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProceed }: UploadModalProps) {
+export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onUploadComplete, onProceed, courses = [] }: UploadModalProps) {
   const [dragActive, setDragActive] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [pastedContent, setPastedContent] = useState('');
   const [sourceMode, setSourceMode] = useState<SourceMode>('enriched');
-  const [step, setStep] = useState<'upload' | 'configure' | 'processing'>('upload');
+  const [step, setStep] = useState<'upload' | 'configure' | 'processing' | 'error'>('upload');
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [focusTags, setFocusTags] = useState<string[]>(['Deep understanding']);
   const [examDate, setExamDate] = useState('');
+  const [uploadMode, setUploadMode] = useState<'new' | 'extend'>('new');
+  const [targetCourseId, setTargetCourseId] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const extendableCourses = courses.filter((c) => !isDemoCourse(c.id));
 
   const FOCUS_OPTIONS = ['Exam preparation', 'Deep understanding', 'Quick review', 'Practice-heavy', 'Beginner-friendly'];
 
@@ -62,6 +72,18 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const resetForm = () => {
+    setStep('upload');
+    setFiles([]);
+    setPastedContent('');
+    setYoutubeUrl('');
+    setFocusTags(['Deep understanding']);
+    setExamDate('');
+    setUploadMode('new');
+    setTargetCourseId('');
+    setProcessingError(null);
+  };
+
   const handleProceed = async () => {
     const payload: UploadPayload = {
       files,
@@ -70,23 +92,27 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
       sourceMode,
       focusTags,
       examDate: examDate || undefined,
+      uploadMode,
+      targetCourseId: uploadMode === 'extend' && targetCourseId ? targetCourseId : undefined,
     };
     setStep('processing');
-    if (onProcessUpload) {
-      await onProcessUpload(payload);
-    } else if (files.length > 0) {
-      onUpload(files);
-    }
-    setTimeout(() => {
+    setProcessingError(null);
+    try {
+      if (onProcessUpload) {
+        const result = await onProcessUpload(payload);
+        if (result && typeof result === 'object' && 'id' in result) {
+          onUploadComplete?.(result as Course);
+        }
+      } else if (files.length > 0) {
+        onUpload(files);
+      }
+      resetForm();
       onProceed();
       onClose();
-      setStep('upload');
-      setFiles([]);
-      setPastedContent('');
-      setYoutubeUrl('');
-      setFocusTags(['Deep understanding']);
-      setExamDate('');
-    }, 1500);
+    } catch (err) {
+      setProcessingError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
+      setStep('error');
+    }
   };
 
   const hasContent = files.length > 0 || pastedContent.trim().length > 0 || youtubeUrl.trim().length > 0;
@@ -99,7 +125,7 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        className="fixed inset-0 z-[100] flex items-center justify-center p-4"
       >
         <div className="absolute inset-0 bg-black/70" onClick={onClose} />
 
@@ -116,7 +142,8 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
               <p className="text-sm text-text-secondary mt-0.5">
                 {step === 'upload' && 'Drop your files or paste content'}
                 {step === 'configure' && 'Configure your course generation'}
-                {step === 'processing' && 'AI is analyzing your material...'}
+                {step === 'processing' && 'Analyzing your material…'}
+                {step === 'error' && 'Something went wrong'}
               </p>
             </div>
             <button onClick={onClose} className="p-2 rounded-lg hover:bg-surface-hover">
@@ -195,6 +222,7 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
                 <div>
                   <label className="text-xs text-text-tertiary font-medium block mb-2">Or paste content directly</label>
                   <textarea
+                    data-testid="upload-paste"
                     value={pastedContent}
                     onChange={e => setPastedContent(e.target.value)}
                     placeholder="Paste your notes, text, or any learning material here..."
@@ -211,6 +239,7 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
                   </label>
                   <input
                     type="url"
+                    data-testid="upload-youtube-url"
                     value={youtubeUrl}
                     onChange={e => setYoutubeUrl(e.target.value)}
                     placeholder="https://youtube.com/watch?v=..."
@@ -222,6 +251,46 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
 
             {step === 'configure' && (
               <>
+                {extendableCourses.length > 0 && (
+                  <div>
+                    <label className="text-sm font-medium block mb-3">Course target</label>
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setUploadMode('new')}
+                        className={cn(
+                          'w-full text-left p-3 rounded-xl border text-sm transition-all',
+                          uploadMode === 'new' ? 'border-brand-500/50 bg-brand-500/10' : 'border-border-subtle',
+                        )}
+                      >
+                        Create new course from this upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUploadMode('extend')}
+                        className={cn(
+                          'w-full text-left p-3 rounded-xl border text-sm transition-all',
+                          uploadMode === 'extend' ? 'border-brand-500/50 bg-brand-500/10' : 'border-border-subtle',
+                        )}
+                      >
+                        Extend an existing course (merge new topics)
+                      </button>
+                      {uploadMode === 'extend' && (
+                        <select
+                          value={targetCourseId}
+                          onChange={(e) => setTargetCourseId(e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl bg-surface-input border border-border-subtle text-sm"
+                        >
+                          <option value="">Select course…</option>
+                          {extendableCourses.map((c) => (
+                            <option key={c.id} value={c.id}>{c.title}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Source mode */}
                 <div>
                   <label className="text-sm font-medium block mb-3">Source Mode</label>
@@ -293,6 +362,21 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
               </>
             )}
 
+            {step === 'error' && (
+              <div className="text-center py-8 space-y-4">
+                <AlertCircle className="w-12 h-12 text-accent-rose mx-auto" />
+                <h3 className="text-lg font-semibold">Could not process your material</h3>
+                <p className="text-sm text-text-secondary max-w-md mx-auto">{processingError}</p>
+                <button
+                  type="button"
+                  onClick={() => setStep('configure')}
+                  className="px-5 py-2.5 rounded-xl bg-brand-600 text-white text-sm font-medium hover:bg-brand-500"
+                >
+                  Back to settings
+                </button>
+              </div>
+            )}
+
             {step === 'processing' && (
               <div className="text-center py-8">
                 <div className="relative w-20 h-20 mx-auto mb-6">
@@ -328,7 +412,7 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
           </div>
 
           {/* Footer */}
-          {step !== 'processing' && (
+          {step !== 'processing' && step !== 'error' && (
             <div className="p-5 border-t border-border-subtle flex items-center justify-between">
               <button
                 onClick={step === 'configure' ? () => setStep('upload') : onClose}
@@ -337,11 +421,12 @@ export function UploadModal({ isOpen, onClose, onUpload, onProcessUpload, onProc
                 {step === 'configure' ? 'Back' : 'Cancel'}
               </button>
               <button
+                data-testid={step === 'upload' ? 'upload-continue' : 'upload-generate'}
                 onClick={step === 'upload' ? () => setStep('configure') : handleProceed}
-                disabled={step === 'upload' && !hasContent}
+                disabled={(step === 'upload' && !hasContent) || (step === 'configure' && uploadMode === 'extend' && !targetCourseId)}
                 className={cn(
                   'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-sm transition-all',
-                  (step === 'upload' && !hasContent)
+                  (step === 'upload' && !hasContent) || (step === 'configure' && uploadMode === 'extend' && !targetCourseId)
                     ? 'bg-surface-hover text-text-muted cursor-not-allowed'
                     : 'bg-gradient-to-r from-brand-600 to-brand-500 text-white hover:from-brand-500 hover:to-brand-400'
                 )}

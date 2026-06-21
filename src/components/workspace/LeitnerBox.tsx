@@ -3,13 +3,7 @@ import { Layers, RotateCcw } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import type { FsrsRating } from '../../lib/pedagogy';
 import { useI18n } from '../../lib/i18n';
-
-const DEFAULT_CARDS = [
-  { front: 'Cournot competition', back: 'Firms choose quantity simultaneously; price from market demand.' },
-  { front: 'Bertrand Paradox', back: 'Two firms with identical products → P = MC (competitive outcome).' },
-  { front: 'Price elasticity of demand', back: 'PED = %ΔQ / %ΔP (always negative for normal goods).' },
-  { front: 'Consumer surplus', back: 'Area between demand curve and market price, above price line.' },
-];
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 const BOX_KEYS = ['leitnerAgain', 'leitnerHard', 'leitnerGood', 'leitnerEasy'] as const;
 
@@ -19,13 +13,17 @@ interface LeitnerBoxProps {
   onRate?: (rating: FsrsRating) => void;
   /** When true, the first FSRS rating triggers onRate and ends the session (task-bound review). */
   completeOnRate?: boolean;
+  emptyMessage?: string;
+  onUpload?: () => void;
 }
 
 export function LeitnerBox({
-  cards = DEFAULT_CARDS,
+  cards = [],
   concept,
   onRate,
   completeOnRate = false,
+  emptyMessage,
+  onUpload,
 }: LeitnerBoxProps) {
   const { t } = useI18n();
   const [index, setIndex] = useState(0);
@@ -33,11 +31,11 @@ export function LeitnerBox({
   const [boxCounts, setBoxCounts] = useState([2, 1, 0, 0]);
   const [finished, setFinished] = useState(false);
 
-  const deck = cards.length > 0 ? cards : DEFAULT_CARDS;
-  const card = deck[index % deck.length];
+  const deck = cards;
+  const card = deck.length > 0 ? deck[index % deck.length] : null;
 
   const rate = (rating: FsrsRating) => {
-    if (finished) return;
+    if (finished || !card) return;
     const boxIdx = { again: 0, hard: 1, good: 2, easy: 3 }[rating];
     setBoxCounts((prev) => prev.map((c, i) => (i === boxIdx ? c + 1 : c)));
     onRate?.(rating);
@@ -48,6 +46,15 @@ export function LeitnerBox({
     setFlipped(false);
     setIndex((i) => i + 1);
   };
+
+  if (deck.length === 0) {
+    return (
+      <WorkspaceEmptyState
+        message={emptyMessage ?? 'Upload notes to generate flashcards from your glossary and definitions.'}
+        onUpload={onUpload}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col h-full p-4">
@@ -70,7 +77,7 @@ export function LeitnerBox({
         className="flex-1 min-h-[140px] rounded-xl border border-brand-500/30 bg-brand-500/5 p-5 text-left hover:border-brand-500/50 transition-all"
       >
         <p className="text-[10px] text-text-muted mb-2">{flipped ? t('answer') : t('question')}</p>
-        <p className="text-sm font-medium leading-relaxed">{flipped ? card.back : card.front}</p>
+        <p className="text-sm font-medium leading-relaxed">{flipped ? card!.back : card!.front}</p>
       </button>
 
       {finished && (

@@ -53,6 +53,7 @@ export function Shell({ children, currentView, onNavigate, sidebarOpen, onToggle
           {navViews.map(item => (
             <button
               key={item.view}
+              data-testid={`nav-${item.view}`}
               onClick={() => onNavigate(item.view)}
               className={cn(
                 'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all',
@@ -113,7 +114,7 @@ export function Shell({ children, currentView, onNavigate, sidebarOpen, onToggle
             </div>
 
             <nav className="flex-1 p-3 space-y-1">
-              {navItems.map(item => (
+              {navViews.map(item => (
                 <button
                   key={item.view}
                   onClick={() => onNavigate(item.view)}
@@ -125,7 +126,12 @@ export function Shell({ children, currentView, onNavigate, sidebarOpen, onToggle
                   )}
                 >
                   <item.icon className="w-5 h-5" />
-                  {item.label}
+                  {t(item.labelKey)}
+                  {item.view === 'tasks' && stats.reviewsDue > 0 && (
+                    <span className="ml-auto text-xs bg-accent-rose/20 text-accent-rose px-2 py-0.5 rounded-full font-semibold">
+                      {stats.reviewsDue}
+                    </span>
+                  )}
                 </button>
               ))}
             </nav>

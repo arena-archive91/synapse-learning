@@ -1,7 +1,8 @@
-import { useState, useCallback, useMemo, useRef } from 'react';
-import type { AppView, Course, AgentMessage, AgentMode, UploadedFile, UserSettings, LearnerModel, DashboardStats, MistakeRecord, ActivityItem } from '../types';
-import { createActivity, SEED_ACTIVITIES } from '../lib/activityLog';
-import { mockUser, mockCourses, mockTasks, mockLearnerModel, mockDashboardStats, mockAgentMessages } from '../data/mockData';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import type { AppView, Course, AgentMessage, AgentMode, UploadedFile, UserSettings, LearnerModel, DashboardStats, MistakeRecord, ActivityItem, GlossaryEntry } from '../types';
+import { createActivity } from '../lib/activityLog';
+import { SEED_ACTIVITIES } from '../demo/activityDemo';
+import { mockUser, mockCourses, mockTasks, mockLearnerModel, mockDashboardStats, mockAgentMessages } from '../demo/mockData';
 import { loadThemePreference, applyTheme } from '../lib/theme';
 import { ECON_CONCEPT_IMPORTANCE } from '../data/conceptGraph';
 import {
@@ -17,13 +18,49 @@ import {
   type FsrsRating,
 } from '../lib/pedagogy';
 import { ECON_CONCEPT_EDGES } from '../data/conceptGraph';
+import { edgesFromCourses } from '../lib/conceptEdges';
 import { loadJson, saveJson } from '../lib/persistence';
+import { hydrateLibrary, loadLibrarySync, saveLibrarySync } from '../lib/libraryStorage';
+import { mergeLibraries, remoteLibraryToPersisted } from '../lib/librarySync';
+import { fetchYoutubeTranscript } from '../lib/youtubeTranscript';
+import { fetchRemoteLibrary, fetchRemoteSession, pushRemoteSession, authMe } from '../lib/authClient';
+import {
+  loadLocalSession,
+  mergeSessions,
+  localSessionToRemote,
+  remoteSessionToLocal,
+} from '../lib/sessionSync';
 import { filterTasksForSession, getTaskAction, getTaskConcept, getAgentMode, type SessionType } from '../lib/taskFlows';
 import { settingsToAgentMode } from '../lib/settingsEffects';
-import { buildCourseFromUpload, readTextFromFiles, uploadedFileMeta, extractFileContent, type UploadPayload } from '../lib/uploadPipeline';
+import { buildCourseFromUpload, buildCourseFromOutline, readTextFromFiles, uploadedFileMeta, extractFileContent, type UploadPayload } from '../lib/uploadPipeline';
+import { buildConceptSpans, type SourceHighlight } from '../lib/conceptProvenance';
+import { generateCourseOutline } from '../lib/courseGenerator';
+import { analyzeContentToOutline, analyzeContentToOutlineAsync } from '../lib/contentAnalysis';
 import type { BetaMastery } from '../lib/pedagogy';
+import {
+  shouldShowDemo,
+  initialCourses,
+  stripDemoFromTasks,
+} from '../lib/demoMode';
+import { buildInitialUser, applyAuthIdentity, levelFromXp } from '../lib/identity';
+import { createEmptyLearnerModel, EMPTY_DASHBOARD_STATS } from '../lib/emptyLearnerState';
+import { mergeCourseTasks } from '../lib/taskGenerator';
+import { syncLearnerHeatmap, computeStreakFromHeatmap } from '../lib/activityAnalytics';
+import { computeRetentionRate, weeklyMasteryFromActivities } from '../lib/retentionAnalytics';
+import { mergeOutlineIntoCourse } from '../lib/courseMerge';
+import {
+  applySkillUpdate,
+  ensureSkillNode,
+  findSkillForConcept,
+  fsrsRatingToConfidence,
+  mergeBetaFromCourse,
+  mergeSkillNodesFromCourse,
+  updateCourseTopicMastery,
+} from '../lib/skillNodes';
 
 const STORAGE_KEY = 'session-v2';
+
+const MOCK_COURSE_IDS = new Set(mockCourses.map((c) => c.id));
 
 type PersistedState = {
   learnerModel: LearnerModel;
@@ -37,7 +74,30 @@ type PersistedState = {
   userSettings: UserSettings;
 };
 
-function initBetaMastery(): BetaMastery[] {
+function initTasks(
+  persisted: Partial<PersistedState>,
+  generatedCourses: Course[],
+  settings: UserSettings,
+): typeof mockTasks {
+  const showDemo = shouldShowDemo(settings);
+  let tasks = persisted.tasks ?? [];
+  if (showDemo && tasks.length === 0) return mockTasks;
+  tasks = stripDemoFromTasks(tasks);
+  for (const course of generatedCourses) {
+    if (course.status !== 'generating') {
+      tasks = mergeCourseTasks(tasks, course);
+    }
+  }
+  return tasks;
+}
+
+function initActivities(persisted: Partial<PersistedState>, settings: UserSettings): ActivityItem[] {
+  if (shouldShowDemo(settings)) return persisted.activities ?? SEED_ACTIVITIES;
+  return persisted.activities ?? [];
+}
+
+function initBetaMastery(settings: UserSettings): BetaMastery[] {
+  if (!shouldShowDemo(settings)) return [];
   const allSkills = [
     ...mockLearnerModel.strongAreas,
     ...mockLearnerModel.weakAreas,
@@ -57,28 +117,7 @@ function initBetaMastery(): BetaMastery[] {
   });
 }
 
-const INITIAL_MISTAKES: MistakeRecord[] = [
-  {
-    id: 'mistake-1',
-    concept: 'Elasticity Calculations',
-    questionSummary: 'Price elasticity when price rises 10% and quantity falls 15%',
-    wrongAnswer: 'Used absolute change instead of percentage',
-    correctAnswer: 'PED = -15% / 10% = -1.5',
-    courseId: 'c1',
-    createdAt: '2026-01-10',
-    resolved: false,
-  },
-  {
-    id: 'mistake-2',
-    concept: 'Consumer Surplus',
-    questionSummary: 'Area under demand curve above market price',
-    wrongAnswer: 'Included producer surplus region',
-    correctAnswer: 'Only triangle between demand curve and price line',
-    courseId: 'c1',
-    createdAt: '2026-01-09',
-    resolved: false,
-  },
-];
+import { DEMO_INITIAL_MISTAKES as INITIAL_MISTAKES } from '../demo/mockData';
 
 function loadPersisted(): Partial<PersistedState> {
   const legacy = loadJson<Partial<PersistedState>>('session-v1', {});
@@ -86,52 +125,89 @@ function loadPersisted(): Partial<PersistedState> {
   return { ...legacy, ...current };
 }
 
-function masteryMapFromSkills(lm: LearnerModel): Record<string, number> {
+function masteryMapFromSkills(lm: LearnerModel, courses: Course[], showDemo: boolean): Record<string, number> {
   const map: Record<string, number> = {};
   for (const s of [...lm.strongAreas, ...lm.weakAreas, ...lm.almostKnown]) {
     map[s.concept] = s.mastery;
   }
-  for (const t of mockCourses[0]?.topics ?? []) {
-    map[t.title] = t.mastery;
+  for (const c of courses) {
+    if (!showDemo && MOCK_COURSE_IDS.has(c.id)) continue;
+    for (const t of c.topics) {
+      map[t.title] = t.mastery;
+    }
   }
   return map;
 }
 
 export function useAppStore() {
   const persisted = useMemo(() => loadPersisted(), []);
-
-  const [currentView, setCurrentView] = useState<AppView>('landing');
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [user, setUser] = useState({
-    ...mockUser,
-    xp: persisted.xp ?? mockUser.xp,
-    settings: {
+  const library = useMemo(() => loadLibrarySync(), []);
+  const mergedSettings = useMemo(
+    () => ({
       ...mockUser.settings,
       ...persisted.userSettings,
       theme: loadThemePreference(),
-    },
+    }),
+    [persisted.userSettings],
+  );
+  const initialActivities = useMemo(
+    () => initActivities(persisted, mergedSettings),
+    [persisted, mergedSettings],
+  );
+
+  const [currentView, setCurrentView] = useState<AppView>('landing');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [user, setUser] = useState(() => buildInitialUser({
+    settings: mergedSettings,
+    persistedXp: persisted.xp,
+    authEmail: mergedSettings.authEmail,
+  }));
+  const [courses, setCourses] = useState<Course[]>(
+    () => initialCourses(library.generatedCourses, mergedSettings, mockCourses),
+  );
+  const [tasks, setTasks] = useState(
+    () => initTasks(persisted, library.generatedCourses, mergedSettings),
+  );
+  const [learnerModel, setLearnerModel] = useState<LearnerModel>(() => {
+    const base = shouldShowDemo(mergedSettings)
+      ? (persisted.learnerModel ?? mockLearnerModel)
+      : (persisted.learnerModel ?? createEmptyLearnerModel('u1', initialActivities));
+    return syncLearnerHeatmap(base, initialActivities);
   });
-  const [courses, setCourses] = useState<Course[]>(mockCourses);
-  const [tasks, setTasks] = useState(persisted.tasks ?? mockTasks);
-  const [learnerModel, setLearnerModel] = useState<LearnerModel>(persisted.learnerModel ?? mockLearnerModel);
-  const [dashboardStats, setDashboardStats] = useState<DashboardStats>(persisted.dashboardStats ?? mockDashboardStats);
-  const [betaMastery, setBetaMastery] = useState<BetaMastery[]>(persisted.betaMastery ?? initBetaMastery());
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats>(() => {
+    const base = shouldShowDemo(mergedSettings)
+      ? (persisted.dashboardStats ?? mockDashboardStats)
+      : (persisted.dashboardStats ?? EMPTY_DASHBOARD_STATS);
+    const heatmap = syncLearnerHeatmap(createEmptyLearnerModel('u1', initialActivities), initialActivities).heatmapData;
+    return { ...base, streak: computeStreakFromHeatmap(heatmap) };
+  });
+  const [betaMastery, setBetaMastery] = useState<BetaMastery[]>(
+    () => persisted.betaMastery ?? initBetaMastery(mergedSettings),
+  );
   const [firstAttemptKeys, setFirstAttemptKeys] = useState<Set<string>>(
     new Set(persisted.firstAttemptKeys ?? []),
   );
   const [openMistakes, setOpenMistakes] = useState<MistakeRecord[]>(
-    persisted.openMistakes ?? INITIAL_MISTAKES,
+    shouldShowDemo(mergedSettings) ? (persisted.openMistakes ?? INITIAL_MISTAKES) : (persisted.openMistakes ?? []),
   );
-  const [activities, setActivities] = useState<ActivityItem[]>(persisted.activities ?? SEED_ACTIVITIES);
-  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(mockAgentMessages);
+  const [activities, setActivities] = useState<ActivityItem[]>(initialActivities);
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(
+    shouldShowDemo(mergedSettings) ? mockAgentMessages : [],
+  );
   const [agentMode, setAgentMode] = useState<AgentMode>('socratic');
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>(library.uploadedFiles);
+  const [glossaryEntries, setGlossaryEntries] = useState<GlossaryEntry[]>(library.glossaryEntries);
   const [isUploading, setIsUploading] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [activeLessonView, setActiveLessonView] = useState(false);
   const [practicalLessonView, setPracticalLessonView] = useState(false);
   const [studyWorkspaceOpen, setStudyWorkspaceOpen] = useState(false);
+  const [sourceHighlight, setSourceHighlight] = useState<SourceHighlight | null>(null);
+  const openSourceAt = useCallback((highlight: SourceHighlight) => {
+    setSourceHighlight(highlight);
+    setStudyWorkspaceOpen(true);
+  }, []);
   const [reviewSessionOpen, setReviewSessionOpen] = useState(false);
   const [mistakeRetryOpen, setMistakeRetryOpen] = useState(false);
   const [examPrepOpen, setExamPrepOpen] = useState(false);
@@ -141,6 +217,30 @@ export function useAppStore() {
   const [activeSessionType, setActiveSessionType] = useState<SessionType | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+
+  const persistLibrary = useCallback((
+    files: UploadedFile[],
+    glossary: GlossaryEntry[],
+    allCourses: Course[],
+  ) => {
+    saveLibrarySync({
+      uploadedFiles: files,
+      glossaryEntries: glossary,
+      generatedCourses: allCourses.filter((c) => !MOCK_COURSE_IDS.has(c.id)),
+    });
+  }, []);
+
+  useEffect(() => {
+    void hydrateLibrary({
+      uploadedFiles: library.uploadedFiles,
+      glossaryEntries: library.glossaryEntries,
+      generatedCourses: library.generatedCourses,
+    }).then((hydrated) => {
+      if (hydrated.uploadedFiles.some((f, i) => f.extractedText !== library.uploadedFiles[i]?.extractedText)) {
+        setUploadedFiles(hydrated.uploadedFiles);
+      }
+    });
+  }, [library.uploadedFiles, library.glossaryEntries, library.generatedCourses]);
 
   const persist = useCallback((
     nextLearner: LearnerModel,
@@ -169,17 +269,26 @@ export function useAppStore() {
   const logActivity = useCallback((item: ActivityItem): ActivityItem[] => {
     const next = [item, ...activities].slice(0, 50);
     setActivities(next);
+    setLearnerModel((lm) => syncLearnerHeatmap(lm, next));
+    setDashboardStats((stats) => ({
+      ...stats,
+      streak: computeStreakFromHeatmap(syncLearnerHeatmap(learnerModel, next).heatmapData),
+    }));
     return next;
-  }, [activities]);
+  }, [activities, learnerModel]);
 
   const recomputeLearnerMetrics = useCallback((
     lm: LearnerModel,
     beta: BetaMastery[],
     keys: Set<string>,
-    mistakes: MistakeRecord[],
+    _mistakes: MistakeRecord[],
   ): LearnerModel => {
-    const masteryMap = masteryMapFromSkills(lm);
-    const repairs = computePrerequisiteRepairs(masteryMap, ECON_CONCEPT_EDGES);
+    const masteryMap = masteryMapFromSkills(lm, courses, shouldShowDemo(user.settings));
+    const courseEdges = edgesFromCourses(courses);
+    const edges = courseEdges.length > 0
+      ? courseEdges
+      : (shouldShowDemo(user.settings) ? ECON_CONCEPT_EDGES : []);
+    const repairs = computePrerequisiteRepairs(masteryMap, edges);
     const calibration = computeCalibration(lm.confidenceCalibration);
     const firstCount = keys.size;
     const fallbackAccuracy = lm.confidenceCalibration.length > 0
@@ -193,7 +302,7 @@ export function useAppStore() {
       overallMastery: readiness,
       interactionInsights: deriveInsights(lm, repairs, calibration),
     };
-  }, []);
+  }, [courses, user.settings]);
 
   const navigate = useCallback((view: AppView) => {
     setCurrentView(view);
@@ -212,8 +321,7 @@ export function useAppStore() {
 
       setLearnerModel((lm) => {
         const concept = task.title.split('—')[0]?.trim() ?? task.title;
-        const allSkills = [...lm.strongAreas, ...lm.weakAreas, ...lm.almostKnown];
-        const match = allSkills.find((s) => s.concept.toLowerCase().includes(concept.toLowerCase().slice(0, 8)));
+        const match = findSkillForConcept(lm, concept);
         const updatedSkill = match ? updateSkillMastery(match, true, 70) : null;
 
         const nextWeak = updatedSkill
@@ -240,7 +348,7 @@ export function useAppStore() {
             const nextXp = u.xp + task.xpReward;
             const nextActs = logActivity(createActivity('task_complete', `Completed: ${task.title}`, task.xpReward));
             persist(next, nextStats, updated, nextXp, betaMastery, firstAttemptKeys, openMistakes, nextActs, u.settings);
-            return { ...u, xp: nextXp };
+            return { ...u, xp: nextXp, level: levelFromXp(nextXp) };
           });
           return nextStats;
         });
@@ -274,8 +382,27 @@ export function useAppStore() {
       );
 
       setLearnerModel((lm) => {
-        const nextSpacing = lm.spacingIntervals.some((s) => s.concept === concept)
-          ? lm.spacingIntervals.map((s) =>
+        const correct = rating !== 'again';
+        const confidence = fsrsRatingToConfidence(rating);
+        const skill = ensureSkillNode(lm, concept, task.courseId);
+        const updatedSkill = updateSkillMastery(skill, correct, confidence);
+        let nextLm = applySkillUpdate(lm, updatedSkill);
+
+        const betaIdx = betaMastery.findIndex(
+          (b) => b.concept.toLowerCase().includes(concept.toLowerCase().slice(0, 6))
+            || concept.toLowerCase().includes(b.concept.toLowerCase().slice(0, 6)),
+        );
+        const betaRecord = betaIdx >= 0
+          ? betaMastery[betaIdx]!
+          : { concept, alpha: 1, beta: 1, firstAttempts: 0, importance: 1 };
+        const nextBetaRecord = updateBetaMastery(betaRecord, correct);
+        const nextBeta = betaIdx >= 0
+          ? betaMastery.map((b, i) => (i === betaIdx ? nextBetaRecord : b))
+          : [...betaMastery, nextBetaRecord];
+        setBetaMastery(nextBeta);
+
+        const nextSpacing = nextLm.spacingIntervals.some((s) => s.concept === concept)
+          ? nextLm.spacingIntervals.map((s) =>
               s.concept === concept
                 ? {
                     ...s,
@@ -287,7 +414,7 @@ export function useAppStore() {
                 : s,
             )
           : [
-              ...lm.spacingIntervals,
+              ...nextLm.spacingIntervals,
               {
                 concept,
                 interval: days,
@@ -299,14 +426,16 @@ export function useAppStore() {
             ];
 
         let next: LearnerModel = {
-          ...lm,
+          ...nextLm,
           spacingIntervals: nextSpacing,
-          retrievalPerformance: rating === 'again'
-            ? Math.max(0, lm.retrievalPerformance - 0.02)
-            : Math.min(1, lm.retrievalPerformance + 0.04),
-          totalSessions: lm.totalSessions + 1,
+          retrievalPerformance: correct
+            ? Math.min(1, nextLm.retrievalPerformance + 0.04)
+            : Math.max(0, nextLm.retrievalPerformance - 0.02),
+          totalSessions: nextLm.totalSessions + 1,
         };
-        next = recomputeLearnerMetrics(next, betaMastery, firstAttemptKeys, openMistakes);
+        next = recomputeLearnerMetrics(next, nextBeta, firstAttemptKeys, openMistakes);
+
+        setCourses((prev) => updateCourseTopicMastery(prev, task.courseId, concept, correct ? 6 : -8, correct));
 
         setDashboardStats((stats) => {
           const nextStats: DashboardStats = {
@@ -319,8 +448,13 @@ export function useAppStore() {
           setUser((u) => {
             const nextXp = u.xp + task.xpReward;
             const nextActs = logActivity(createActivity('review_done', `Reviewed: ${task.title} (${rating})`, task.xpReward));
-            persist(next, nextStats, updated, nextXp, betaMastery, firstAttemptKeys, openMistakes, nextActs, u.settings);
-            return { ...u, xp: nextXp };
+            next = {
+              ...next,
+              retentionRate: computeRetentionRate(nextActs),
+              weeklyMastery: weeklyMasteryFromActivities(nextActs),
+            };
+            persist(next, nextStats, updated, nextXp, nextBeta, firstAttemptKeys, openMistakes, nextActs, u.settings);
+            return { ...u, xp: nextXp, level: levelFromXp(nextXp) };
           });
           return nextStats;
         });
@@ -331,6 +465,86 @@ export function useAppStore() {
       return updated;
     });
   }, [learnerModel.spacingIntervals, betaMastery, firstAttemptKeys, openMistakes, persist, recomputeLearnerMetrics]);
+
+  const submitLeitnerRating = useCallback((concept: string, rating: FsrsRating, courseId?: string) => {
+    const resolvedCourseId =
+      courseId ??
+      courses.find((c) => !MOCK_COURSE_IDS.has(c.id))?.id ??
+      'unknown';
+    const spacing = learnerModel.spacingIntervals.find((s) =>
+      s.concept.toLowerCase().includes(concept.toLowerCase().slice(0, 6))
+      || concept.toLowerCase().includes(s.concept.toLowerCase().slice(0, 6)),
+    );
+    const stability = spacing?.stability ?? 0.5;
+    const reviewCount = spacing?.reviewCount ?? 0;
+    const days = fsrsIntervalDays(stability, rating, reviewCount);
+    const correct = rating !== 'again';
+    const confidence = fsrsRatingToConfidence(rating);
+
+    setLearnerModel((lm) => {
+      const skill = ensureSkillNode(lm, concept, resolvedCourseId);
+      const updatedSkill = updateSkillMastery(skill, correct, confidence);
+      let nextLm = applySkillUpdate(lm, updatedSkill);
+
+      const betaIdx = betaMastery.findIndex(
+        (b) => b.concept.toLowerCase().includes(concept.toLowerCase().slice(0, 6))
+          || concept.toLowerCase().includes(b.concept.toLowerCase().slice(0, 6)),
+      );
+      const betaRecord = betaIdx >= 0
+        ? betaMastery[betaIdx]!
+        : { concept, alpha: 1, beta: 1, firstAttempts: 0, importance: 1 };
+      const nextBetaRecord = updateBetaMastery(betaRecord, correct);
+      const nextBeta = betaIdx >= 0
+        ? betaMastery.map((b, i) => (i === betaIdx ? nextBetaRecord : b))
+        : [...betaMastery, nextBetaRecord];
+      setBetaMastery(nextBeta);
+
+      const nextSpacing = nextLm.spacingIntervals.some((s) => s.concept === concept)
+        ? nextLm.spacingIntervals.map((s) =>
+            s.concept === concept
+              ? {
+                  ...s,
+                  interval: days,
+                  reviewCount: s.reviewCount + 1,
+                  nextReview: new Date(Date.now() + days * 86400000).toISOString(),
+                  stability: rating === 'again' ? Math.max(0.1, s.stability - 0.15) : Math.min(1, s.stability + 0.1),
+                }
+              : s,
+          )
+        : [
+            ...nextLm.spacingIntervals,
+            {
+              concept,
+              interval: days,
+              nextReview: new Date(Date.now() + days * 86400000).toISOString(),
+              stability: rating === 'again' ? 0.3 : 0.55,
+              difficulty: 0.5,
+              reviewCount: 1,
+            },
+          ];
+
+      let next: LearnerModel = {
+        ...nextLm,
+        spacingIntervals: nextSpacing,
+        retrievalPerformance: correct
+          ? Math.min(1, nextLm.retrievalPerformance + 0.04)
+          : Math.max(0, nextLm.retrievalPerformance - 0.02),
+        totalSessions: nextLm.totalSessions + 1,
+      };
+      next = recomputeLearnerMetrics(next, nextBeta, firstAttemptKeys, openMistakes);
+
+      setCourses((prev) => updateCourseTopicMastery(prev, resolvedCourseId, concept, correct ? 6 : -8, correct));
+
+      const nextActs = logActivity(createActivity('review_done', `Leitner: ${concept} (${rating})`, 5));
+      next = {
+        ...next,
+        retentionRate: computeRetentionRate(nextActs),
+        weeklyMastery: weeklyMasteryFromActivities(nextActs),
+      };
+      persist(next, dashboardStats, tasks, user.xp, nextBeta, firstAttemptKeys, openMistakes, nextActs, user.settings);
+      return next;
+    });
+  }, [courses, learnerModel.spacingIntervals, betaMastery, firstAttemptKeys, openMistakes, dashboardStats, tasks, user.xp, user.settings, persist, recomputeLearnerMetrics, logActivity]);
 
   const resolveMistake = useCallback((mistakeId: string) => {
     setOpenMistakes((prev) => {
@@ -365,9 +579,20 @@ export function useAppStore() {
     persist(next, dashboardStats, tasks, user.xp, betaMastery, firstAttemptKeys, openMistakes, activities, user.settings);
   }, [learnerModel, betaMastery, firstAttemptKeys, openMistakes, dashboardStats, tasks, user.xp, user.settings, activities, persist, recomputeLearnerMetrics]);
 
-  const recordQuizAttempt = useCallback((concept: string, correct: boolean, confidence: number, stepKey?: string) => {
+  const recordQuizAttempt = useCallback((
+    concept: string,
+    correct: boolean,
+    confidence: number,
+    stepKey?: string,
+    courseId?: string,
+  ) => {
     const attemptKey = stepKey ?? `${concept}:${Date.now()}`;
     const isFirstAttempt = !firstAttemptKeys.has(attemptKey);
+    const resolvedCourseId =
+      courseId ??
+      tasks.find((t) => getTaskConcept(t).toLowerCase() === concept.toLowerCase())?.courseId ??
+      courses.find((c) => !MOCK_COURSE_IDS.has(c.id))?.id ??
+      'unknown';
 
     const point = {
       predicted: confidence / 100,
@@ -385,7 +610,7 @@ export function useAppStore() {
       const idx = betaMastery.findIndex((b) => concept.toLowerCase().includes(b.concept.toLowerCase().slice(0, 6))
         || b.concept.toLowerCase().includes(concept.toLowerCase().slice(0, 6)));
       const record = idx >= 0
-        ? betaMastery[idx]
+        ? betaMastery[idx]!
         : { concept, alpha: 1, beta: 1, firstAttempts: 0, importance: 1 };
       const updated = updateBetaMastery(record, correct);
       nextBeta = idx >= 0 ? betaMastery.map((b, i) => (i === idx ? updated : b)) : [...betaMastery, updated];
@@ -400,7 +625,7 @@ export function useAppStore() {
           id: `mistake-${Date.now()}`,
           concept,
           questionSummary: `Quiz on ${concept}`,
-          courseId: 'c1',
+          courseId: resolvedCourseId,
           createdAt: new Date().toISOString(),
           resolved: false,
         },
@@ -409,43 +634,57 @@ export function useAppStore() {
       setOpenMistakes(nextMistakes);
     }
 
-    const allSkills = [...learnerModel.strongAreas, ...learnerModel.weakAreas, ...learnerModel.almostKnown];
-    const match = allSkills.find((s) => concept.toLowerCase().includes(s.concept.toLowerCase().slice(0, 6)))
-      ?? learnerModel.weakAreas[0];
+    const skill = ensureSkillNode(learnerModel, concept, resolvedCourseId);
+    const updatedSkill = updateSkillMastery(skill, correct, confidence);
+    let nextLm = applySkillUpdate(
+      { ...learnerModel, confidenceCalibration: calibration, averageConfidence: avgConf },
+      updatedSkill,
+    );
 
-    if (match) {
-      const updated = isFirstAttempt ? updateSkillMastery(match, correct, confidence) : match;
-      const spacing = learnerModel.spacingIntervals.map((s) =>
-        s.concept === updated.concept
-          ? {
-              ...s,
-              interval: computeReviewInterval(s.reviewCount + 1, confidence, correct),
-              reviewCount: s.reviewCount + 1,
-              nextReview: new Date(Date.now() + computeReviewInterval(s.reviewCount + 1, confidence, correct) * 86400000).toISOString(),
-              stability: correct ? Math.min(1, s.stability + 0.08) : Math.max(0.1, s.stability - 0.12),
-            }
-          : s,
-      );
+    const spacing = nextLm.spacingIntervals.some((s) => s.concept === updatedSkill.concept)
+      ? nextLm.spacingIntervals.map((s) =>
+          s.concept === updatedSkill.concept
+            ? {
+                ...s,
+                interval: computeReviewInterval(s.reviewCount + 1, confidence, correct),
+                reviewCount: s.reviewCount + 1,
+                nextReview: new Date(Date.now() + computeReviewInterval(s.reviewCount + 1, confidence, correct) * 86400000).toISOString(),
+                stability: correct ? Math.min(1, s.stability + 0.08) : Math.max(0.1, s.stability - 0.12),
+              }
+            : s,
+        )
+      : [
+          ...nextLm.spacingIntervals,
+          {
+            concept: updatedSkill.concept,
+            interval: computeReviewInterval(1, confidence, correct),
+            nextReview: new Date(Date.now() + computeReviewInterval(1, confidence, correct) * 86400000).toISOString(),
+            stability: correct ? 0.55 : 0.3,
+            difficulty: 0.5,
+            reviewCount: 1,
+          },
+        ];
 
-      let next: LearnerModel = {
-        ...learnerModel,
-        confidenceCalibration: calibration,
-        averageConfidence: avgConf,
-        weakAreas: learnerModel.weakAreas.map((s) => (s.concept === updated.concept ? updated : s)),
-        strongAreas: learnerModel.strongAreas.map((s) => (s.concept === updated.concept ? updated : s)),
-        almostKnown: learnerModel.almostKnown.map((s) => (s.concept === updated.concept ? updated : s)),
-        spacingIntervals: spacing,
-        retrievalPerformance: correct
-          ? Math.min(1, learnerModel.retrievalPerformance + 0.02)
-          : Math.max(0, learnerModel.retrievalPerformance - 0.03),
-      };
-      next = recomputeLearnerMetrics(next, nextBeta, nextKeys, nextMistakes);
-      setLearnerModel(next);
-      const actType = correct ? 'quiz_passed' : 'quiz_failed';
-      const nextActs = logActivity(createActivity(actType, `${correct ? 'Passed' : 'Missed'} quiz on ${concept}`, correct ? 15 : undefined));
-      persist(next, dashboardStats, tasks, user.xp, nextBeta, nextKeys, nextMistakes, nextActs, user.settings);
-    }
-  }, [firstAttemptKeys, betaMastery, openMistakes, learnerModel, dashboardStats, tasks, user.xp, user.settings, persist, recomputeLearnerMetrics, logActivity]);
+    let next: LearnerModel = {
+      ...nextLm,
+      spacingIntervals: spacing,
+      retrievalPerformance: correct
+        ? Math.min(1, nextLm.retrievalPerformance + 0.02)
+        : Math.max(0, nextLm.retrievalPerformance - 0.03),
+    };
+    next = recomputeLearnerMetrics(next, nextBeta, nextKeys, nextMistakes);
+    setLearnerModel(next);
+    setCourses((prev) => updateCourseTopicMastery(prev, resolvedCourseId, concept, correct ? 8 : -10, correct));
+    const actType = correct ? 'quiz_passed' : 'quiz_failed';
+    const nextActs = logActivity(createActivity(actType, `${correct ? 'Passed' : 'Missed'} quiz on ${concept}`, correct ? 15 : undefined));
+    const nextWithRetention = {
+      ...next,
+      retentionRate: computeRetentionRate(nextActs),
+      weeklyMastery: weeklyMasteryFromActivities(nextActs),
+    };
+    setLearnerModel(nextWithRetention);
+    persist(nextWithRetention, dashboardStats, tasks, user.xp, nextBeta, nextKeys, nextMistakes, nextActs, user.settings);
+  }, [firstAttemptKeys, betaMastery, openMistakes, learnerModel, dashboardStats, tasks, courses, user.xp, user.settings, persist, recomputeLearnerMetrics, logActivity]);
 
   const addAgentMessage = useCallback((msg: AgentMessage) => {
     setAgentMessages((prev) => [...prev, msg]);
@@ -556,39 +795,320 @@ export function useAppStore() {
     });
   }, [learnerModel, tasks, user.xp, user.settings, betaMastery, firstAttemptKeys, openMistakes, persist, logActivity]);
 
+  const applyRemoteLibrary = useCallback((merged: ReturnType<typeof mergeLibraries>) => {
+    setUploadedFiles(merged.uploadedFiles);
+    setGlossaryEntries(merged.glossaryEntries);
+    const nextCourses = initialCourses(merged.generatedCourses, user.settings, mockCourses);
+    setCourses(nextCourses);
+
+    let nextTasks = stripDemoFromTasks(tasks);
+    for (const course of merged.generatedCourses) {
+      if (course.status !== 'generating') {
+        nextTasks = mergeCourseTasks(nextTasks, course);
+      }
+    }
+    setTasks(nextTasks);
+
+    let nextLm = learnerModel;
+    let nextBeta = betaMastery;
+    for (const course of merged.generatedCourses) {
+      nextBeta = mergeBetaFromCourse(nextBeta, course);
+      nextLm = mergeSkillNodesFromCourse(nextLm, course);
+    }
+    const nextLmMetrics = recomputeLearnerMetrics(nextLm, nextBeta, firstAttemptKeys, openMistakes);
+    setBetaMastery(nextBeta);
+    setLearnerModel(nextLmMetrics);
+    persistLibrary(merged.uploadedFiles, merged.glossaryEntries, merged.generatedCourses);
+    persist(nextLmMetrics, dashboardStats, nextTasks, user.xp, nextBeta, firstAttemptKeys, openMistakes, activities, user.settings);
+    void hydrateLibrary(merged).then((hydrated) => {
+      if (hydrated.uploadedFiles.some((f, i) => f.extractedText !== merged.uploadedFiles[i]?.extractedText)) {
+        setUploadedFiles(hydrated.uploadedFiles);
+      }
+    });
+  }, [user.settings, tasks, learnerModel, betaMastery, firstAttemptKeys, openMistakes, dashboardStats, user.xp, activities, persist, persistLibrary, recomputeLearnerMetrics]);
+
+  const pullLibraryFromServer = useCallback(async () => {
+    const token = user.settings.authToken;
+    if (!token) throw new Error('Sign in to pull your library');
+    const remote = await fetchRemoteLibrary(token, user.settings);
+    const local = loadLibrarySync();
+    const merged = mergeLibraries(local, remoteLibraryToPersisted(remote));
+    applyRemoteLibrary(merged);
+    return merged;
+  }, [user.settings, applyRemoteLibrary]);
+
+  const applyRemoteSession = useCallback((merged: ReturnType<typeof mergeSessions>) => {
+    const nextTasks = stripDemoFromTasks(merged.tasks as typeof tasks);
+    const nextKeys = new Set(merged.firstAttemptKeys);
+    const nextLm = syncLearnerHeatmap(merged.learnerModel, merged.activities);
+    const nextStats = {
+      ...merged.dashboardStats,
+      streak: computeStreakFromHeatmap(nextLm.heatmapData),
+    };
+    setLearnerModel(nextLm);
+    setDashboardStats(nextStats);
+    setTasks(nextTasks);
+    setBetaMastery(merged.betaMastery);
+    setFirstAttemptKeys(nextKeys);
+    setOpenMistakes(merged.openMistakes);
+    setActivities(merged.activities);
+    setUser((u) => {
+      const merged2 = applyAuthIdentity(u, merged.userSettings.authEmail);
+      return {
+        ...merged2,
+        xp: merged.xp,
+        level: levelFromXp(merged.xp),
+        settings: { ...u.settings, ...merged.userSettings },
+      };
+    });
+    persist(
+      nextLm,
+      nextStats,
+      nextTasks,
+      merged.xp,
+      merged.betaMastery,
+      nextKeys,
+      merged.openMistakes,
+      merged.activities,
+      { ...user.settings, ...merged.userSettings },
+    );
+  }, [persist, user.settings]);
+
+  const pullSessionFromServer = useCallback(async () => {
+    const token = user.settings.authToken;
+    if (!token) throw new Error('Sign in to pull your session');
+    const remote = await fetchRemoteSession(token, user.settings);
+    const local = loadLocalSession();
+    const merged = mergeSessions(local, remoteSessionToLocal(remote));
+    applyRemoteSession(merged);
+    return merged;
+  }, [user.settings, applyRemoteSession]);
+
+  const pushSessionToServer = useCallback(async () => {
+    const token = user.settings.authToken;
+    if (!token) throw new Error('Sign in to push your session');
+    const local = loadLocalSession();
+    const payload = localSessionToRemote({
+      learnerModel,
+      dashboardStats,
+      tasks,
+      xp: user.xp,
+      betaMastery,
+      firstAttemptKeys: [...firstAttemptKeys],
+      openMistakes,
+      activities,
+      userSettings: user.settings,
+      ...local,
+    });
+    return pushRemoteSession(token, user.settings, payload);
+  }, [
+    user.settings,
+    user.xp,
+    learnerModel,
+    dashboardStats,
+    tasks,
+    betaMastery,
+    firstAttemptKeys,
+    openMistakes,
+    activities,
+  ]);
+
+  const syncAccountOnLogin = useCallback(async () => {
+    const token = user.settings.authToken;
+    if (token) {
+      try {
+        const me = await authMe(token, user.settings);
+        if (me.email) {
+          setUser((u) => applyAuthIdentity(u, me.email));
+        }
+      } catch {
+        /* ignore — sync still proceeds */
+      }
+    }
+    await pullLibraryFromServer();
+    await pullSessionFromServer();
+    await pushSessionToServer();
+  }, [user.settings, pullLibraryFromServer, pullSessionFromServer, pushSessionToServer]);
+
+  const refreshAuthPlan = useCallback(async () => {
+    const token = user.settings.authToken;
+    if (!token) return null;
+    const me = await authMe(token, user.settings);
+    updateSettings({ authPlan: me.plan, authEmail: me.email ?? user.settings.authEmail });
+    if (me.email) {
+      setUser((u) => applyAuthIdentity(u, me.email));
+    }
+    return me.plan;
+  }, [user.settings, updateSettings]);
+
+  const autoSessionSynced = useRef<string | null>(null);
+  useEffect(() => {
+    const token = user.settings.authToken;
+    if (!token || autoSessionSynced.current === token) return;
+    autoSessionSynced.current = token;
+    void pullSessionFromServer().catch(() => {
+      autoSessionSynced.current = null;
+    });
+  }, [user.settings.authToken, pullSessionFromServer]);
+
   const processUpload = useCallback(async (payload: UploadPayload) => {
     setIsUploading(true);
-    const fileTexts: string[] = [];
-    const newFiles: UploadedFile[] = [];
-    for (const f of payload.files) {
-      const extracted = await extractFileContent(f);
-      if (extracted.text.trim()) fileTexts.push(extracted.text);
-      newFiles.push(uploadedFileMeta(f, undefined, undefined, extracted.text, extracted.pageCount));
+    try {
+      const MIN_SOURCE_CHARS = 80;
+      const fileTexts: string[] = [];
+      const newFiles: UploadedFile[] = [];
+      let ytTranscript = '';
+      const pasted = payload.pastedContent?.trim() ?? '';
+
+      for (const f of payload.files) {
+        const extracted = await extractFileContent(f, user.settings);
+        if (extracted.text.trim()) fileTexts.push(extracted.text);
+        newFiles.push(uploadedFileMeta(f, undefined, undefined, extracted.text, extracted.pageCount));
+      }
+      if (payload.youtubeUrl) {
+        const fetched = await fetchYoutubeTranscript(payload.youtubeUrl, user.settings);
+        if (fetched?.trim()) {
+          ytTranscript = fetched;
+          fileTexts.push(ytTranscript);
+        }
+      }
+
+      let text = [pasted, ...fileTexts].filter(Boolean).join('\n\n');
+      if (text.trim().length < MIN_SOURCE_CHARS) {
+        text = await readTextFromFiles(payload.files, user.settings);
+      }
+      if (text.trim().length < MIN_SOURCE_CHARS) {
+        throw new Error(
+          'Could not extract enough readable text (need at least 80 characters). '
+          + 'Use PDF with selectable text, scanned PDF (OCR), DOCX, TXT/MD, images, or paste your notes directly.',
+        );
+      }
+
+      if (pasted && !fileTexts.some((t) => t.includes(pasted.slice(0, 40)))) {
+        newFiles.push({
+          id: `file-paste-${Date.now()}`,
+          name: 'Pasted notes',
+          type: 'txt',
+          size: pasted.length,
+          uploadedAt: new Date().toISOString(),
+          status: 'analyzed',
+          progress: 100,
+          extractedText: pasted,
+        });
+      }
+      if (newFiles.length === 0) {
+        newFiles.push({
+          id: `file-source-${Date.now()}`,
+          name: payload.files[0]?.name ?? 'Course notes',
+          type: 'txt',
+          size: text.length,
+          uploadedAt: new Date().toISOString(),
+          status: 'analyzed',
+          progress: 100,
+          extractedText: text,
+        });
+      }
+
+    // Course generation, best source first:
+    //   1. LLM-grounded outline (richest) when an API key is configured;
+    //   2. otherwise the offline content-recognition engine, which derives a
+    //      real structured outline from the actual note content — no key needed;
+    //   3. only if there's too little text, the lightweight keyword template.
+    let course: Course;
+    const fileNames = payload.files.map((f) => f.name);
+    const outline =
+      (await generateCourseOutline(text, fileNames, user.settings)) ??
+      (await analyzeContentToOutlineAsync(text, fileNames, user.settings)) ??
+      analyzeContentToOutline(text, fileNames, user.settings);
+    let nextGlossary = glossaryEntries;
+    const extendTarget =
+      payload.uploadMode === 'extend' && payload.targetCourseId
+        ? courses.find((c) => c.id === payload.targetCourseId && !MOCK_COURSE_IDS.has(c.id))
+        : undefined;
+
+    if (outline) {
+      const built = buildCourseFromOutline(outline, { ...payload, pastedContent: text }, courses.length);
+      if (extendTarget) {
+        const merged = mergeOutlineIntoCourse(
+          extendTarget,
+          outline,
+          fileNames,
+          glossaryEntries,
+          built.glossary,
+        );
+        course = merged.course;
+        nextGlossary = [
+          ...glossaryEntries.filter((g) => g.courseId !== course.id),
+          ...merged.glossary,
+        ];
+        setGlossaryEntries(nextGlossary);
+      } else {
+        course = built.course;
+        if (built.glossary.length > 0) {
+          nextGlossary = [...glossaryEntries, ...built.glossary];
+          setGlossaryEntries(nextGlossary);
+        }
+      }
+    } else if (extendTarget) {
+      course = extendTarget;
+    } else {
+      course = buildCourseFromUpload({ ...payload, pastedContent: text }, courses.length);
     }
-    const text = [payload.pastedContent, ...fileTexts].filter(Boolean).join('\n\n') || (await readTextFromFiles(payload.files));
-    const course = buildCourseFromUpload({ ...payload, pastedContent: text }, courses.length);
     const topics = course.topics.map((t) => t.title);
-    const withCourse = newFiles.map((meta) => ({ ...meta, courseId: course.id, extractedTopics: topics }));
+    const withCourse = newFiles.map((meta) => ({
+      ...meta,
+      courseId: course.id,
+      extractedTopics: topics,
+      extractedText: meta.extractedText?.trim()
+        ? meta.extractedText
+        : (newFiles.length === 1 ? text : meta.extractedText),
+    }));
     if (payload.youtubeUrl) {
       withCourse.push({
         id: `file-yt-${Date.now()}`,
         name: payload.youtubeUrl,
         type: 'txt',
-        size: 0,
+        size: ytTranscript.length,
         uploadedAt: new Date().toISOString(),
         status: 'analyzed',
         progress: 100,
         courseId: course.id,
         extractedTopics: topics,
+        extractedText: ytTranscript || undefined,
       });
     }
-    setUploadedFiles((prev) => [...prev, ...withCourse]);
-    setCourses((prev) => [...prev, course]);
-    setIsUploading(false);
-    const nextActs = logActivity(createActivity('upload', `Created course: ${course.title}`));
-    persist(learnerModel, dashboardStats, tasks, user.xp, betaMastery, firstAttemptKeys, openMistakes, nextActs, user.settings);
+    const nextFiles = [...uploadedFiles, ...withCourse];
+    if (outline && course.conceptSpans === undefined) {
+      const conceptLabels = [...new Set(outline.topics.flatMap((t) => t.concepts))];
+      course = {
+        ...course,
+        conceptSpans: buildConceptSpans(withCourse, conceptLabels, course.id),
+      };
+    }
+    const generatedOnly = [
+      ...courses.filter((c) => !MOCK_COURSE_IDS.has(c.id) && c.id !== course.id),
+      course,
+    ];
+    const nextCourses = initialCourses(generatedOnly, user.settings, mockCourses);
+    const nextTasks = mergeCourseTasks(stripDemoFromTasks(tasks), course);
+    const nextBeta = mergeBetaFromCourse(betaMastery, course);
+    const nextLm = mergeSkillNodesFromCourse(learnerModel, course);
+    const nextLmMetrics = recomputeLearnerMetrics(nextLm, nextBeta, firstAttemptKeys, openMistakes);
+    setUploadedFiles(nextFiles);
+    setCourses(nextCourses);
+    setTasks(nextTasks);
+    setBetaMastery(nextBeta);
+    setLearnerModel(nextLmMetrics);
+    persistLibrary(nextFiles, nextGlossary, nextCourses.filter((c) => !MOCK_COURSE_IDS.has(c.id)));
+    const actLabel = extendTarget ? `Extended course: ${course.title}` : `Created course: ${course.title}`;
+    const nextActs = logActivity(createActivity('upload', actLabel));
+    persist(nextLmMetrics, dashboardStats, nextTasks, user.xp, nextBeta, firstAttemptKeys, openMistakes, nextActs, user.settings);
+    setSelectedCourse(course);
     return course;
-  }, [courses.length, learnerModel, dashboardStats, tasks, user.xp, user.settings, betaMastery, firstAttemptKeys, openMistakes, persist, logActivity]);
+    } finally {
+      setIsUploading(false);
+    }
+  }, [courses, uploadedFiles, glossaryEntries, learnerModel, dashboardStats, tasks, user.xp, user.settings, betaMastery, firstAttemptKeys, openMistakes, persist, persistLibrary, logActivity]);
 
   const simulateUpload = useCallback((files: File[]) => {
     setIsUploading(true);
@@ -699,6 +1219,7 @@ export function useAppStore() {
     dailyGoalMinutes?: number;
     examDate?: string;
     openUpload?: boolean;
+    displayName?: string;
   }) => {
     setUser((prev) => {
       const nextSettings: UserSettings = {
@@ -706,8 +1227,10 @@ export function useAppStore() {
         dailyGoalMinutes: data.dailyGoalMinutes ?? prev.settings.dailyGoalMinutes,
         examDate: data.examDate || prev.settings.examDate,
       };
+      const trimmedName = (data.displayName ?? '').trim();
       const next = {
         ...prev,
+        name: trimmedName || prev.name,
         segment: (data.role as typeof prev.segment) ?? prev.segment,
         onboardingComplete: true,
         settings: nextSettings,
@@ -734,22 +1257,26 @@ export function useAppStore() {
   }, [learnerModel, user.settings.examDate, tasks, dashboardStats.studyTimeToday]);
 
   const pedagogyMetrics = useMemo(() => {
-    const masteryMap = masteryMapFromSkills(learnerModel);
-    const repairs = computePrerequisiteRepairs(masteryMap, ECON_CONCEPT_EDGES);
+    const masteryMap = masteryMapFromSkills(learnerModel, courses, shouldShowDemo(user.settings));
+    const courseEdges = edgesFromCourses(courses);
+    const edges = courseEdges.length > 0
+      ? courseEdges
+      : (shouldShowDemo(user.settings) ? ECON_CONCEPT_EDGES : []);
+    const repairs = computePrerequisiteRepairs(masteryMap, edges);
     const calibration = computeCalibration(learnerModel.confidenceCalibration);
     const conceptBars = betaMastery.map((b) => ({
       concept: b.concept,
       mastery: Math.round(betaMean(b.alpha, b.beta) * 100),
     }));
     return { repairs, calibration, conceptBars, openMistakes: openMistakes.filter((m) => !m.resolved) };
-  }, [learnerModel, betaMastery, openMistakes]);
+  }, [learnerModel, betaMastery, openMistakes, courses, user.settings]);
 
   return {
     currentView, navigate,
     sidebarOpen, setSidebarOpen,
     user, updateSettings, toggleTheme,
     courses, selectedCourse, setSelectedCourse,
-    tasks, completeTask, completeTaskAndAdvance, submitReviewRating, submitReviewAndAdvance,
+    tasks, completeTask, completeTaskAndAdvance, submitReviewRating, submitReviewAndAdvance, submitLeitnerRating,
     startTask, startSession, endSession,
     sessionQueue, sessionTotal, activeSessionType,
     activeTask, activeTaskId, setActiveTaskId, expandedTaskId, setExpandedTaskId,
@@ -757,11 +1284,14 @@ export function useAppStore() {
     recordConfidence, recordQuizAttempt,
     openMistakes, resolveMistake, resolveMisconception, completeOnboarding,
     agentMessages, addAgentMessage, updateAgentMessage, agentMode, setAgentMode, bindAgentToTask,
-    uploadedFiles, isUploading, simulateUpload, processUpload, logStudyMinutes,
+    uploadedFiles, glossaryEntries, isUploading, simulateUpload, processUpload,
+    pullLibraryFromServer, pullSessionFromServer, pushSessionToServer, syncAccountOnLogin,
+    refreshAuthPlan, logStudyMinutes,
     showUploadModal, setShowUploadModal,
     activeLessonView, setActiveLessonView,
     practicalLessonView, setPracticalLessonView,
     studyWorkspaceOpen, setStudyWorkspaceOpen,
+    sourceHighlight, openSourceAt, clearSourceHighlight: () => setSourceHighlight(null),
     reviewSessionOpen, setReviewSessionOpen,
     mistakeRetryOpen, setMistakeRetryOpen,
     examPrepOpen, setExamPrepOpen,

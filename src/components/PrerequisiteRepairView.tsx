@@ -14,6 +14,7 @@ interface PrerequisiteRepairViewProps {
   targetConcept?: string;
   xpReward?: number;
   steps?: PrerequisiteStep[];
+  checkpoint?: { question: string; options: string[]; correctIndex: number };
 }
 
 export function PrerequisiteRepairView({
@@ -27,35 +28,28 @@ export function PrerequisiteRepairView({
   targetConcept,
   xpReward = 30,
   steps = [],
+  checkpoint,
 }: PrerequisiteRepairViewProps) {
   const [stepIndex, setStepIndex] = useState(0);
   const [checkpointAnswer, setCheckpointAnswer] = useState<number | null>(null);
   const [checkpointDone, setCheckpointDone] = useState(false);
 
-  const isUtilityTopic = quizConcept.toLowerCase().includes('utility');
-  const checkpointQuestion = isUtilityTopic
-    ? 'Quick check: Why are indifference curves convex?'
-    : `Quick check: What is the core idea of ${quizConcept}?`;
-  const checkpointOptions = isUtilityTopic
-    ? [
-        'Diminishing marginal rate of substitution',
-        'Because utility is always increasing',
-        'Due to the budget constraint slope',
-        'They are not convex in standard theory',
-      ]
-    : [
-        `The definition and key properties of ${quizConcept}`,
-        'An unrelated concept from another chapter',
-        'Only the formula with no assumptions',
-        'A graph with no economic interpretation',
-      ];
+  const checkpointQuestion = checkpoint?.question
+    ?? `Quick check: What is the core idea of ${quizConcept}?`;
+  const checkpointOptions = checkpoint?.options ?? [
+    `The definition and key properties of ${quizConcept}`,
+    'An unrelated concept from another chapter',
+    'Only the formula with no assumptions',
+    'A graph with no interpretation',
+  ];
+  const checkpointCorrectIndex = checkpoint?.correctIndex ?? 0;
   const repairSteps = steps.length > 0 ? steps : [{ title: quizConcept, body: 'Review the foundational concept before continuing.' }];
   const isLastStep = stepIndex >= repairSteps.length - 1;
   const sessionTitle = taskTitle ?? `Prerequisite Repair: ${quizConcept}`;
 
   const handleCheckpoint = (index: number) => {
     setCheckpointAnswer(index);
-    const correct = index === 0;
+    const correct = index === checkpointCorrectIndex;
     setCheckpointDone(true);
     onQuizAttempt?.(quizConcept, correct, 70);
   };
@@ -120,7 +114,7 @@ export function PrerequisiteRepairView({
                   className={cn(
                     'w-full text-left p-3 rounded-xl border text-sm transition-all',
                     checkpointAnswer === i
-                      ? i === 0
+                      ? i === checkpointCorrectIndex
                         ? 'border-accent-emerald/50 bg-accent-emerald/10 text-accent-emerald'
                         : 'border-accent-rose/50 bg-accent-rose/10 text-accent-rose'
                       : 'border-border-subtle hover:border-brand-500/30',
@@ -131,8 +125,8 @@ export function PrerequisiteRepairView({
               ))}
             </div>
             {checkpointDone && (
-              <p className={cn('text-xs mt-3', checkpointAnswer === 0 ? 'text-accent-emerald' : 'text-accent-rose')}>
-                {checkpointAnswer === 0
+              <p className={cn('text-xs mt-3', checkpointAnswer === checkpointCorrectIndex ? 'text-accent-emerald' : 'text-accent-rose')}>
+                {checkpointAnswer === checkpointCorrectIndex
                   ? '✓ Correct — you are ready to return to the dependent topic.'
                   : '✗ Review the steps above before completing the repair.'}
               </p>

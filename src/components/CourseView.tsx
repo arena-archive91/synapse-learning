@@ -25,7 +25,7 @@ export function CourseView({ course, onBack, onStartLesson, onOpenAgent }: Cours
   const progress = (course.completedLessons / Math.max(course.totalLessons, 1)) * 100;
 
   return (
-    <div className="p-4 sm:p-6 pb-24 lg:pb-6 max-w-5xl mx-auto space-y-6">
+    <div className="p-4 sm:p-6 lg:px-8 pb-24 lg:pb-6 w-full min-w-0 space-y-6">
       {/* Back + Header */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -163,6 +163,8 @@ export function CourseView({ course, onBack, onStartLesson, onOpenAgent }: Cours
 }
 
 function TopicCard({ topic, index, courseColor, onStart }: { topic: Topic; index: number; courseColor: string; onStart: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = (topic.objectives?.length ?? 0) > 0 || (topic.keyConcepts?.length ?? 0) > 0;
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
@@ -201,11 +203,21 @@ function TopicCard({ topic, index, courseColor, onStart }: { topic: Topic; index
           <div className="flex items-center gap-3 mt-2 text-xs text-text-muted">
             <span>{topic.estimatedMinutes}m</span>
             <span>{topic.lessons.length || '3-5'} lessons</span>
+            {topic.conceptCount > 0 && <span>{topic.conceptCount} concepts</span>}
             {topic.prerequisites.length > 0 && (
               <span className="flex items-center gap-1">
                 <Target className="w-3 h-3" />
                 {topic.prerequisites.length} prereq
               </span>
+            )}
+            {hasDetail && (
+              <button
+                onClick={() => setExpanded((v) => !v)}
+                className="flex items-center gap-1 text-brand-400 hover:text-brand-300 transition-colors"
+              >
+                <ChevronRight className={cn('w-3 h-3 transition-transform', expanded && 'rotate-90')} />
+                {expanded ? 'Hide' : 'Details'}
+              </button>
             )}
           </div>
         </div>
@@ -238,6 +250,44 @@ function TopicCard({ topic, index, courseColor, onStart }: { topic: Topic; index
           )}
         </div>
       </div>
+
+      {expanded && hasDetail && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          className="px-5 pb-5 pt-0 border-t border-border-subtle/60 space-y-4"
+        >
+          {(topic.objectives?.length ?? 0) > 0 && (
+            <div className="pt-4">
+              <p className="text-xs font-semibold text-text-secondary mb-2 flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-brand-400" /> Learning objectives
+              </p>
+              <ul className="space-y-1">
+                {topic.objectives!.map((o, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-text-secondary">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-accent-emerald shrink-0 mt-0.5" />
+                    {o}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(topic.keyConcepts?.length ?? 0) > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-text-secondary mb-2 flex items-center gap-1.5">
+                <Brain className="w-3.5 h-3.5 text-accent-cyan" /> Key concepts
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {topic.keyConcepts!.map((c, i) => (
+                  <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-surface-hover border border-border-subtle text-text-secondary">
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </motion.div>
+      )}
     </motion.div>
   );
 }
@@ -332,7 +382,7 @@ function CourseAnalytics({ course }: { course: Course }) {
         <h4 className="text-sm font-semibold mb-3">Retention Predictions</h4>
         <div className="space-y-2">
           {course.topics.filter(t => t.mastery > 0).slice(0, 5).map(topic => {
-            const retention = Math.max(20, topic.mastery - Math.random() * 20);
+            const retention = Math.max(0, topic.retentionPrediction || topic.mastery);
             return (
               <div key={topic.id} className="flex items-center justify-between">
                 <span className="text-xs text-text-secondary truncate w-24">{topic.title}</span>

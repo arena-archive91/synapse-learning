@@ -38,7 +38,17 @@ export interface UserSettings {
   openaiApiKey?: string;
   llmModel?: string;
   llmBaseUrl?: string;
+  /** Managed/self-hosted LLM proxy URL (holds the key server-side). */
+  llmProxyUrl?: string;
   useLlm?: boolean;
+  /** Managed proxy auth token from /auth/login */
+  authToken?: string;
+  authEmail?: string;
+  authProxyBase?: string;
+  /** Plan tier from managed proxy (/auth/me). */
+  authPlan?: 'free' | 'pro' | 'team';
+  /** When true, show seeded demo courses/tasks (MVP showcase). Default: false. */
+  showDemoContent?: boolean;
 }
 
 export interface UploadedFile {
@@ -80,6 +90,22 @@ export interface Course {
   conceptCount: number;
   glossaryCount: number;
   exerciseCount: number;
+  /** Sentence-level provenance linking concepts to source file spans. */
+  conceptSpans?: ConceptSpan[];
+}
+
+/** Maps a course concept to a precise span in uploaded source material. */
+export interface ConceptSpan {
+  conceptId: string;
+  concept: string;
+  chunkId: string;
+  fileId: string;
+  fileName?: string;
+  charStart: number;
+  charEnd: number;
+  sentence?: string;
+  page?: number;
+  heading?: string;
 }
 
 export interface Topic {
@@ -94,6 +120,10 @@ export interface Topic {
   estimatedMinutes: number;
   conceptCount: number;
   retentionPrediction: number;
+  /** Key concepts taught in this topic (from content analysis / LLM). */
+  keyConcepts?: string[];
+  /** Learning objectives for this topic. */
+  objectives?: string[];
 }
 
 export interface Lesson {
@@ -284,6 +314,18 @@ export interface HeatmapDay {
   conceptsReviewed: number;
 }
 
+export interface MessageCitation {
+  chunkId: string;
+  fileId: string;
+  fileName: string;
+  locator: string;
+  charStart: number;
+  charEnd: number;
+  page?: number;
+  heading?: string;
+  snippet: string;
+}
+
 export interface AgentMessage {
   id: string;
   role: 'user' | 'agent' | 'system';
@@ -291,6 +333,8 @@ export interface AgentMessage {
   timestamp: string;
   type?: 'text' | 'question' | 'hint' | 'feedback' | 'exercise' | 'code' | 'diagram' | 'citation' | 'quiz';
   sourceReference?: string;
+  /** Structured, precise citations for "show me where this came from". */
+  citations?: MessageCitation[];
   confidence?: number;
   isStreaming?: boolean;
   metadata?: {
@@ -338,6 +382,7 @@ export interface DashboardStats {
   weakConcepts: number;
   upcomingExams: number;
   studyTimeToday: number;
+  studyTimeWeek: number;
   masteryTrend: number[];
   conceptsMastered: number;
   totalConcepts: number;

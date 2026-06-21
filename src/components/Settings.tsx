@@ -1,24 +1,98 @@
+import { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import {
   Brain, BookOpen, Target, Zap,
-  Gauge, Shield, Calendar, Palette
+  Gauge, Shield, Calendar, Palette, Database, KeyRound
 } from 'lucide-react';
 import type { UserSettings } from '../types';
 import { cn } from '../utils/cn';
+import { clearAllSessionData, downloadBackup, importSessionData } from '../lib/sessionBackup';
+import { authLogin, authRegister, pushRemoteLibrary, createCheckoutSession, type AuthSession } from '../lib/authClient';
+import { loadLibrarySync } from '../lib/libraryStorage';
 
 interface SettingsProps {
   settings: UserSettings;
   onUpdate: (partial: Partial<UserSettings>) => void;
+  onPullLibrary?: () => Promise<unknown>;
+  onPullSession?: () => Promise<unknown>;
+  onPushSession?: () => Promise<unknown>;
+  onSyncAccount?: () => Promise<unknown>;
+  onRefreshPlan?: () => Promise<unknown>;
 }
 
-export function Settings({ settings, onUpdate }: SettingsProps) {
+export function Settings({
+  settings,
+  onUpdate,
+  onPullLibrary,
+  onPullSession,
+  onPushSession,
+  onSyncAccount,
+  onRefreshPlan,
+}: SettingsProps) {
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [authEmail, setAuthEmail] = useState(settings.authEmail ?? '');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authStatus, setAuthStatus] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImport = async (file: File) => {
+    const text = await file.text();
+    const result = importSessionData(text);
+    if (result.ok) {
+      setBackupStatus(`Imported ${result.keysImported} saved items. Reload to apply everywhere.`);
+    } else {
+      setBackupStatus(result.error);
+    }
+  };
+
+  const proxyBase = (settings.authProxyBase ?? settings.llmProxyUrl ?? 'http://localhost:8787')
+    .replace(/\/v1\/?$/, '')
+    .replace(/\/$/, '');
+
+  const finishAuth = async (session: AuthSession, label: string) => {
+    onUpdate({
+      authToken: session.token,
+      authEmail: session.email,
+      authPlan: session.plan ?? 'free',
+      llmProxyUrl: settings.llmProxyUrl ?? `${proxyBase}/v1`,
+    });
+    if (onSyncAccount) {
+      await onSyncAccount();
+      setAuthStatus(`${label} ${session.email} — library & progress synced`);
+      return;
+    }
+    if (onPullLibrary) await onPullLibrary();
+    if (onPullSession) await onPullSession();
+    if (onPushSession) await onPushSession();
+    setAuthStatus(`${label} ${session.email}`);
+  };
+
+  const startCheckout = async (plan: 'pro' | 'team') => {
+    if (!settings.authToken) {
+      setAuthStatus('Sign in before upgrading');
+      return;
+    }
+    try {
+      const origin = window.location.origin;
+      const { url } = await createCheckoutSession(settings.authToken, settings, plan, {
+        successUrl: `${origin}/?billing=success`,
+        cancelUrl: `${origin}/?billing=cancel`,
+      });
+      if (url) window.location.href = url;
+      else setAuthStatus('Checkout URL missing — check Stripe configuration');
+    } catch (e) {
+      setAuthStatus(e instanceof Error ? e.message : 'Checkout failed');
+    }
+  };
+
   return (
-    <div className="p-4 sm:p-6 pb-24 lg:pb-6 max-w-3xl mx-auto space-y-6">
+    <div className="p-4 sm:p-6 lg:px-8 pb-24 lg:pb-6 w-full min-w-0 space-y-6">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
         <h1 className="text-2xl sm:text-3xl font-bold">Learning Preferences</h1>
         <p className="text-text-secondary mt-1">Customize how Synapse teaches you. These are UI preferences — the adaptive engine also learns from your behavior.</p>
       </motion.div>
 
+      <div className="lg:grid lg:grid-cols-2 lg:gap-6 lg:items-start [&>*]:mb-6 lg:[&>*]:mb-0">
       {/* Teaching Style */}
       <SettingsSection title="Teaching Approach" icon={<Brain className="w-5 h-5 text-brand-400" />} delay={0.05}>
         <ToggleRow label="Teaching style" options={[
@@ -158,6 +232,17 @@ export function Settings({ settings, onUpdate }: SettingsProps) {
             className="w-full px-4 py-2 rounded-xl bg-surface-input border border-border-subtle text-sm text-text-primary focus:outline-none focus:border-brand-500/50"
           />
         </div>
+        <div>
+          <label className="text-xs text-text-secondary block mb-2">Managed proxy URL (keeps the API key off the browser)</label>
+          <input
+            type="url"
+            value={settings.llmProxyUrl ?? ''}
+            onChange={(e) => onUpdate({ llmProxyUrl: e.target.value || undefined })}
+            placeholder="https://your-proxy.example.com/v1"
+            className="w-full px-4 py-2 rounded-xl bg-surface-input border border-border-subtle text-sm text-text-primary focus:outline-none focus:border-brand-500/50"
+          />
+          <p className="text-[11px] text-text-muted mt-1.5">When set, chat & embeddings route here with no browser key — the proxy injects the secret server-side and can meter managed (paid) usage.</p>
+        </div>
         <ToggleRow label="Use LLM for Agent & Feynman" options={[
           { value: 'true', label: 'Enabled' },
           { value: 'false', label: 'Offline only' },
@@ -165,6 +250,186 @@ export function Settings({ settings, onUpdate }: SettingsProps) {
         <p className="text-xs text-text-muted mt-1 px-1">
           Without a key, Agent and Feynman use offline templates. Keys never leave your browser except to your chosen API endpoint.
         </p>
+      </SettingsSection>
+
+      <SettingsSection title="Account & Sync" icon={<KeyRound className="w-5 h-5 text-accent-teal" />} delay={0.34}>
+        {settings.authToken && (
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span className="text-xs px-2 py-1 rounded-lg bg-surface-hover border border-border-subtle">
+              Plan: <strong className="text-brand-300">{settings.authPlan ?? 'free'}</strong>
+            </span>
+            {(settings.authPlan ?? 'free') === 'free' && (
+              <>
+                <button
+                  type="button"
+                  data-testid="upgrade-pro"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-brand-600 text-white"
+                  onClick={() => void startCheckout('pro')}
+                >
+                  Upgrade to Pro
+                </button>
+                <button
+                  type="button"
+                  data-testid="upgrade-team"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium border border-brand-500/40 text-brand-300"
+                  onClick={() => void startCheckout('team')}
+                >
+                  Upgrade to Team
+                </button>
+              </>
+            )}
+            {onRefreshPlan && (
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-border-subtle text-text-secondary"
+                onClick={async () => {
+                  try {
+                    await onRefreshPlan();
+                    setAuthStatus('Plan refreshed from server');
+                  } catch (e) {
+                    setAuthStatus(e instanceof Error ? e.message : 'Refresh failed');
+                  }
+                }}
+              >
+                Refresh plan
+              </button>
+            )}
+          </div>
+        )}
+        <div>
+          <label className="text-xs text-text-secondary block mb-2">Proxy base URL (auth + library sync)</label>
+          <input
+            type="url"
+            value={settings.authProxyBase ?? settings.llmProxyUrl?.replace(/\/v1\/?$/, '') ?? ''}
+            onChange={(e) => onUpdate({ authProxyBase: e.target.value || undefined })}
+            placeholder="http://localhost:8787"
+            className="w-full px-4 py-2 rounded-xl bg-surface-input border border-border-subtle text-sm"
+          />
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <input
+            type="email"
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            placeholder="Email"
+            className="px-4 py-2 rounded-xl bg-surface-input border border-border-subtle text-sm"
+          />
+          <input
+            type="password"
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            placeholder="Password"
+            className="px-4 py-2 rounded-xl bg-surface-input border border-border-subtle text-sm"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-brand-600 text-white"
+            onClick={async () => {
+              try {
+                const session = await authLogin(authEmail, authPassword, settings);
+                await finishAuth(session, 'Signed in as');
+              } catch (e) {
+                setAuthStatus(e instanceof Error ? e.message : 'Login failed');
+              }
+            }}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-xl text-sm font-medium border border-border-subtle"
+            onClick={async () => {
+              try {
+                const session = await authRegister(authEmail, authPassword, settings);
+                await finishAuth(session, 'Registered');
+              } catch (e) {
+                setAuthStatus(e instanceof Error ? e.message : 'Register failed');
+              }
+            }}
+          >
+            Register
+          </button>
+          {settings.authToken && (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl text-sm font-medium border border-border-subtle"
+              onClick={() => onUpdate({ authToken: undefined, authEmail: undefined, authPlan: undefined })}
+            >
+              Sign out
+            </button>
+          )}
+          {settings.authToken && onPullLibrary && (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl text-sm font-medium border border-border-subtle"
+              onClick={async () => {
+                try {
+                  await onPullLibrary();
+                  setAuthStatus('Library pulled from server');
+                } catch (e) {
+                  setAuthStatus(e instanceof Error ? e.message : 'Pull failed');
+                }
+              }}
+            >
+              Pull library
+            </button>
+          )}
+          {settings.authToken && (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl text-sm font-medium border border-accent-teal/40 text-accent-teal"
+              onClick={async () => {
+                try {
+                  const lib = loadLibrarySync();
+                  await pushRemoteLibrary(settings.authToken!, settings, lib);
+                  setAuthStatus('Library synced to server');
+                } catch (e) {
+                  setAuthStatus(e instanceof Error ? e.message : 'Sync failed');
+                }
+              }}
+            >
+              Push library
+            </button>
+          )}
+          {settings.authToken && onPullSession && (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl text-sm font-medium border border-border-subtle"
+              onClick={async () => {
+                try {
+                  await onPullSession();
+                  setAuthStatus('Progress pulled from server');
+                } catch (e) {
+                  setAuthStatus(e instanceof Error ? e.message : 'Session pull failed');
+                }
+              }}
+            >
+              Pull progress
+            </button>
+          )}
+          {settings.authToken && onPushSession && (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl text-sm font-medium border border-accent-teal/40 text-accent-teal"
+              onClick={async () => {
+                try {
+                  await onPushSession();
+                  setAuthStatus('Progress synced to server');
+                } catch (e) {
+                  setAuthStatus(e instanceof Error ? e.message : 'Session push failed');
+                }
+              }}
+            >
+              Push progress
+            </button>
+          )}
+        </div>
+        {settings.authEmail && (
+          <p className="text-xs text-text-secondary">Logged in: {settings.authEmail}</p>
+        )}
+        {authStatus && <p className="text-xs text-text-muted">{authStatus}</p>}
       </SettingsSection>
 
       {/* Interface */}
@@ -179,6 +444,58 @@ export function Settings({ settings, onUpdate }: SettingsProps) {
           { value: 'el', label: 'Ελληνικά' },
         ]} value={settings.language} onChange={v => onUpdate({ language: v as UserSettings['language'] })} />
       </SettingsSection>
+
+      {/* Data management */}
+      <SettingsSection title="Data & Progress" icon={<Database className="w-5 h-5 text-accent-cyan" />} delay={0.38}>
+        <ToggleRow label="Demo showcase content" options={[
+          { value: 'off', label: 'Hidden' },
+          { value: 'on', label: 'Show demo' },
+        ]} value={settings.showDemoContent ? 'on' : 'off'} onChange={v => onUpdate({ showDemoContent: v === 'on' })} />
+        <p className="text-[11px] text-text-muted">When hidden, only courses and tasks from your uploaded notes appear. Reload after toggling.</p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => { downloadBackup(); setBackupStatus('Backup downloaded.'); }}
+            className="px-3 py-2 rounded-xl text-xs font-medium bg-brand-600/20 text-brand-300 border border-brand-500/30 hover:bg-brand-600/30"
+          >
+            Export backup
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3 py-2 rounded-xl text-xs font-medium border border-border-subtle text-text-secondary hover:border-brand-500/30"
+          >
+            Import backup
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm('Clear all Synapse local data? This cannot be undone.')) {
+                const n = clearAllSessionData();
+                setBackupStatus(`Cleared ${n} stored items. Reload recommended.`);
+              }
+            }}
+            className="px-3 py-2 rounded-xl text-xs font-medium border border-accent-rose/30 text-accent-rose hover:bg-accent-rose/10"
+          >
+            Clear local data
+          </button>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleImport(file);
+            e.target.value = '';
+          }}
+        />
+        {backupStatus && (
+          <p className="text-xs text-text-secondary px-1">{backupStatus}</p>
+        )}
+      </SettingsSection>
+      </div>
 
       <div className="p-4 rounded-xl bg-surface-card border border-border-subtle">
         <p className="text-xs text-text-tertiary leading-relaxed flex items-start gap-2">

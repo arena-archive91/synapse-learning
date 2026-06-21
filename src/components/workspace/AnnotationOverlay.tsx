@@ -4,49 +4,26 @@ import { MessageSquare, Pin, Highlighter, X, ChevronDown, ChevronUp, Sparkles, T
 import { cn } from '../../utils/cn';
 import { useI18n } from '../../lib/i18n';
 import { loadAnnotations, saveAnnotations, type StoredAnnotation } from '../../lib/annotationStore';
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 const COLORS = ['#818cf8', '#fbbf24', '#34d399', '#fb7185', '#22d3ee'];
-
-const DEFAULT_SOURCE = `Chapter 4: Market Structures
-
-4.1 Perfect Competition
-
-A perfectly competitive market is characterised by many buyers and sellers, a homogeneous product, free entry and exit, and perfect information. Each firm is a price taker — it cannot influence the market price.
-
-In the short run, a firm maximises profit where MC = MR = P. If P > ATC the firm earns economic profit. If ATC > P > AVC the firm operates at a loss but continues production. If P < AVC the firm shuts down.
-
-4.2 Monopoly
-
-A monopolist is the sole seller in a market with high barriers to entry. Unlike a competitive firm, the monopolist faces the entire market demand curve and must lower price to sell more units.
-
-The monopolist maximises profit where MR = MC, but sets price from the demand curve above MR. This creates deadweight loss — the monopolist produces less and charges more than a competitive market would.
-
-4.3 Oligopoly
-
-An oligopoly consists of a few large firms whose decisions are interdependent. The key models are:
-
-• Cournot (quantity competition): firms simultaneously choose output levels.
-• Bertrand (price competition): firms simultaneously choose prices.
-• Stackelberg (sequential quantity): one firm moves first as a leader.
-
-The Bertrand Paradox states that with just two firms selling identical products and competing on price, the equilibrium price equals marginal cost — the same as perfect competition.
-
-4.4 Monopolistic Competition
-
-Many firms sell differentiated products. Each firm has some market power but faces competition from close substitutes. In the long run, economic profits are driven to zero by entry.`;
 
 interface Props {
   onAskAgent?: (text: string) => void;
   sourceText?: string;
   sourceName?: string;
   fileKey?: string;
+  emptyMessage?: string;
+  onUpload?: () => void;
 }
 
 export function AnnotationOverlay({
   onAskAgent,
-  sourceText = DEFAULT_SOURCE,
-  sourceName = 'Lecture_Notes_Micro.pdf — Ch4',
-  fileKey = 'default-source',
+  sourceText = '',
+  sourceName = '',
+  fileKey = 'no-source',
+  emptyMessage,
+  onUpload,
 }: Props) {
   const { t } = useI18n();
   const [annotations, setAnnotations] = useState<StoredAnnotation[]>(() => loadAnnotations(fileKey));
@@ -104,6 +81,15 @@ export function AnnotationOverlay({
   annotations.filter((a) => a.type === 'highlight').forEach((a) => {
     for (let i = a.lineStart; i <= a.lineEnd; i++) highlightedLines.add(i);
   });
+
+  if (!sourceText.trim()) {
+    return (
+      <WorkspaceEmptyState
+        message={emptyMessage ?? 'Upload notes to annotate your own source material.'}
+        onUpload={onUpload}
+      />
+    );
+  }
 
   return (
     <div className="relative flex flex-col h-full rounded-2xl border border-border-subtle bg-surface-card overflow-hidden">

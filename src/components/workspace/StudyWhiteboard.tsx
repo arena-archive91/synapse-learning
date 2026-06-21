@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight, Circle, Eraser, Highlighter, Minus, Pen,
-  Redo2, Ruler, Save, Square, Trash2, Type, Undo2,
+  Redo2, Ruler, Save, Square, Trash2, Type, Undo2, BookOpen,
 } from 'lucide-react';
 import { cn } from '../../utils/cn';
+import type { ExtractedFormula } from '../../lib/noteContentExtractors';
+import { loadWhiteboardStrokes, saveWhiteboardStrokes } from '../../lib/workspacePersistence';
 
 type Tool = 'pen' | 'marker' | 'highlighter' | 'eraser' | 'line' | 'rect' | 'ellipse' | 'arrow' | 'ruler' | 'text';
 type Point = { x: number; y: number };
 type Stroke = { tool: Tool; color: string; width: number; points: Point[]; text?: string };
 
 const COLORS = ['#f8fafc', '#67e8f9', '#a78bfa', '#6ee7b7', '#fbbf24', '#f87171', '#fb7185', '#1e293b'];
-const STORAGE_KEY = 'synapse.whiteboard.v1';
+const LEGACY_STORAGE_KEY = 'synapse.whiteboard.v1';
 
 function dist(a: Point, b: Point) {
   return Math.hypot(b.x - a.x, b.y - a.y);
@@ -29,7 +31,16 @@ const TOOL_DEFS: { id: Tool; icon: typeof Pen; label: string }[] = [
   { id: 'text', icon: Type, label: 'Text' },
 ];
 
-export function StudyWhiteboard() {
+export function StudyWhiteboard({
+  referenceFormulas = [],
+  referenceExcerpt,
+  scopeKey,
+}: {
+  referenceFormulas?: ExtractedFormula[];
+  referenceExcerpt?: string;
+  /** Workspace/task identifier used to scope persistence (avoids cross-task bleed). */
+  scopeKey?: string;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [tool, setTool] = useState<Tool>('pen');
@@ -136,10 +147,25 @@ export function StudyWhiteboard() {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setStrokes(JSON.parse(raw) as Stroke[]);
+      const scope = scopeKey ?? '__global';
+      const persisted = loadWhiteboardStrokes<Stroke[]>(scope);
+      if (persisted) {
+        setStrokes(persisted);
+        return;
+      }
+      // One-time migration from the legacy single-key whiteboard so existing
+      // boards aren't lost when scoped persistence is introduced.
+      if (scope === '__global') {
+        const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+        if (legacy) {
+          const parsed = JSON.parse(legacy) as Stroke[];
+          setStrokes(parsed);
+          saveWhiteboardStrokes(scope, parsed);
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+        }
+      }
     } catch { /* ignore */ }
-  }, []);
+  }, [scopeKey]);
 
   useEffect(() => { redraw(strokes, draft); }, [strokes, draft, redraw]);
 
@@ -208,14 +234,54 @@ export function StudyWhiteboard() {
 
   const save = () => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(strokes));
+      saveWhiteboardStrokes(scopeKey ?? '__global', strokes);
       setSavedMsg(true);
       setTimeout(() => setSavedMsg(false), 2000);
     } catch { /* ignore */ }
   };
 
+  const insertFormulaLabel = (label: string, formula: string) => {
+    const x = 40 + Math.random() * 80;
+    const y = 40 + Math.random() * 60;
+    const stroke: Stroke = {
+      tool: 'text',
+      color,
+      width: 2,
+      points: [{ x, y }],
+      text: `${label}: ${formula}`,
+    };
+    setStrokes((s) => [...s, stroke]);
+    setRedoStack([]);
+  };
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col lg:flex-row min-w-0">
+      {(referenceFormulas.length > 0 || referenceExcerpt) && (
+        <aside className="shrink-0 border-b lg:border-b-0 lg:border-r border-border-subtle lg:w-56 overflow-y-auto p-3 space-y-3">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-text-secondary">
+            <BookOpen className="w-3.5 h-3.5 text-brand-400" />
+            From your notes
+          </div>
+          {referenceFormulas.map((f) => (
+            <div key={f.id} className="p-2 rounded-lg bg-surface-card border border-border-subtle">
+              <p className="text-[10px] font-medium text-brand-300 truncate">{f.name}</p>
+              <p className="text-[10px] font-mono text-text-secondary mt-1 break-all">{f.formula}</p>
+              <button
+                type="button"
+                onClick={() => insertFormulaLabel(f.name, f.formula)}
+                className="mt-2 text-[9px] font-medium text-brand-400 hover:text-brand-300"
+              >
+                Insert on board →
+              </button>
+            </div>
+          ))}
+          {referenceExcerpt && referenceFormulas.length === 0 && (
+            <p className="text-[10px] text-text-tertiary leading-relaxed line-clamp-6">{referenceExcerpt.slice(0, 280)}…</p>
+          )}
+        </aside>
+      )}
+
+      <div className="flex min-h-0 flex-1 flex-col min-w-0">
       <div className="shrink-0 border-b border-border-subtle px-3 py-2">
         <h3 className="text-sm font-semibold">Study Whiteboard</h3>
         <p className="text-[10px] text-text-tertiary">Sketch diagrams, annotate, and save to this device.</p>
@@ -238,8 +304,8 @@ export function StudyWhiteboard() {
           </button>
         ))}
         <div className="mx-1 h-5 w-px bg-border-subtle" />
-        <button type="button" onClick={undo} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover"><Undo2 className="w-3.5 h-3.5" /></button>
-        <button type="button" onClick={redo} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover"><Redo2 className="w-3.5 h-3.5" /></button>
+        <button type="button" onClick={undo} disabled={strokes.length === 0} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover disabled:opacity-40 disabled:cursor-not-allowed"><Undo2 className="w-3.5 h-3.5" /></button>
+        <button type="button" onClick={redo} disabled={redoStack.length === 0} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover disabled:opacity-40 disabled:cursor-not-allowed"><Redo2 className="w-3.5 h-3.5" /></button>
         <button type="button" onClick={() => { setStrokes([]); setRedoStack([]); setDraft(null); }} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover"><Trash2 className="w-3.5 h-3.5" /></button>
         <button type="button" onClick={save} className="rounded-lg p-1.5 text-text-muted hover:bg-surface-hover"><Save className="w-3.5 h-3.5" /></button>
         {savedMsg && <span className="text-[10px] text-accent-emerald">Saved</span>}
@@ -269,6 +335,7 @@ export function StudyWhiteboard() {
           onPointerUp={onUp}
           onPointerLeave={onUp}
         />
+      </div>
       </div>
     </div>
   );

@@ -21,7 +21,8 @@ export function getLessonProgress(lessonKey: string): LessonProgressRecord | nul
 
 export function saveLessonProgress(lessonKey: string, patch: Partial<LessonProgressRecord>): LessonProgressRecord {
   const store = load();
-  const next: LessonProgressRecord = { step: 0, ...store[lessonKey], ...patch };
+  const existing = store[lessonKey] ?? { step: 0 };
+  const next: LessonProgressRecord = { ...existing, ...patch };
   store[lessonKey] = next;
   saveJson(KEY, store);
   return next;

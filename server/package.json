@@ -1,0 +1,37 @@
+{
+  "name": "synapse-learning-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 6 backend skeleton for Synapse Learning: OpenAI-compatible LLM proxy with accounts, JWT auth, and usage metering. Keeps the provider API key server-side and unlocks managed (paid) usage.",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate": "node-pg-migrate up -m migrations --migration-file-language cjs",
+    "migrate:down": "node-pg-migrate down -m migrations --migration-file-language cjs",
+    "migrate:create": "node-pg-migrate create -m migrations --migration-file-language cjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-pg-migrate": "^7.9.1",
+    "pg": "^8.13.1",
+    "stripe": "^17.7.0",
+    "tesseract.js": "^5.1.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

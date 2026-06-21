@@ -5,8 +5,13 @@ import {
   Zap, Calendar, CheckCircle2, XCircle, Lightbulb,
   Activity, Shield, Eye, HelpCircle
 } from 'lucide-react';
-import type { LearnerModel, DashboardStats, Course } from '../types';
-import { computeCalibration } from '../lib/pedagogy';
+import type { LearnerModel, DashboardStats, Course, ActivityItem } from '../types';
+import { computeCalibration, type PrerequisiteRepair } from '../lib/pedagogy';
+import {
+  adaptiveRecommendations,
+  retentionCurveFromActivities,
+  weeklyMasteryFromActivities,
+} from '../lib/retentionAnalytics';
 import { CalibrationChip } from './visuals/CalibrationChip';
 import { cn } from '../utils/cn';
 import { ReadinessRing } from './visuals/ReadinessRing';
@@ -17,15 +22,121 @@ interface AnalyticsProps {
   learnerModel: LearnerModel;
   stats: DashboardStats;
   courses: Course[];
+  activities?: ActivityItem[];
+  prerequisiteRepairs?: PrerequisiteRepair[];
 }
 
 type AnalyticsTab = 'overview' | 'mastery' | 'behavior' | 'insights';
 
-export function Analytics({ learnerModel, stats, courses }: AnalyticsProps) {
+type GraphNode = {
+  id: string;
+  label: string;
+  mastery: number;
+  type: 'concept' | 'formula' | 'definition' | 'theory';
+  x: number;
+  y: number;
+};
+type GraphEdge = { from: string; to: string; relation: 'prerequisite' | 'related' | 'contrasts' | 'example-of' };
+
+const slug = (s: string): string =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'n';
+
+function classifyNode(label: string): GraphNode['type'] {
+  const lower = label.toLowerCase();
+  if (/(formula|equation|=|theorem|law of)/.test(lower)) return 'formula';
+  if (/(definition|defined|is the|means)/.test(lower)) return 'definition';
+  if (/(theory|model|principle)/.test(lower)) return 'theory';
+  return 'concept';
+}
+
+/** Lay out N nodes on a circle inside the SVG viewport. */
+function radialLayout(count: number, width: number, height: number): { x: number; y: number }[] {
+  if (count === 0) return [];
+  if (count === 1) return [{ x: width / 2, y: height / 2 }];
+  const cx = width / 2;
+  const cy = height / 2;
+  const r = Math.min(width, height) / 2 - 60;
+  return Array.from({ length: count }, (_, i) => {
+    const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
+    return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+  });
+}
+
+/**
+ * Build a concept-mastery graph from the learner's actual data:
+ *   - Nodes from course topics (with their mastery), plus learner skill nodes if not already present.
+ *   - Prerequisite edges from each topic's `prerequisites` field, resolving by title similarity.
+ *   - Falls back to an empty graph when there is no real data.
+ */
+function buildMasteryGraph(
+  learnerModel: LearnerModel,
+  courses: Course[],
+): { nodes: GraphNode[]; edges: GraphEdge[]; height: number } {
+  const generated = courses.filter((c) => c.status !== 'generating');
+  const skills = [
+    ...learnerModel.strongAreas,
+    ...learnerModel.almostKnown,
+    ...learnerModel.weakAreas,
+  ];
+  const labelToId = new Map<string, string>();
+  const items: { label: string; mastery: number }[] = [];
+
+  for (const c of generated) {
+    for (const t of c.topics) {
+      const key = t.title.trim();
+      if (!key || labelToId.has(key.toLowerCase())) continue;
+      const id = `t-${slug(key)}`;
+      labelToId.set(key.toLowerCase(), id);
+      items.push({ label: key, mastery: Math.round(t.mastery) });
+    }
+  }
+  for (const s of skills) {
+    const key = s.concept.trim();
+    if (!key || labelToId.has(key.toLowerCase())) continue;
+    const id = `s-${slug(key)}`;
+    labelToId.set(key.toLowerCase(), id);
+    items.push({ label: key, mastery: Math.round(s.mastery) });
+  }
+
+  if (items.length === 0) return { nodes: [], edges: [], height: 380 };
+
+  const width = 660;
+  const height = Math.max(380, 200 + items.length * 18);
+  const positions = radialLayout(items.length, width, height);
+  const nodes: GraphNode[] = items.map((it, i) => ({
+    id: labelToId.get(it.label.toLowerCase())!,
+    label: it.label,
+    mastery: it.mastery,
+    type: classifyNode(it.label),
+    x: positions[i]!.x,
+    y: positions[i]!.y,
+  }));
+
+  const edges: GraphEdge[] = [];
+  for (const c of generated) {
+    for (const t of c.topics) {
+      const toId = labelToId.get(t.title.toLowerCase());
+      if (!toId) continue;
+      for (const pre of t.prerequisites ?? []) {
+        const fromId = labelToId.get(pre.toLowerCase());
+        if (fromId && fromId !== toId) edges.push({ from: fromId, to: toId, relation: 'prerequisite' });
+      }
+    }
+  }
+  return { nodes, edges, height };
+}
+
+export function Analytics({
+  learnerModel,
+  stats,
+  courses,
+  activities = [],
+  prerequisiteRepairs = [],
+}: AnalyticsProps) {
   const [tab, setTab] = useState<AnalyticsTab>('overview');
 
   return (
-    <div className="p-4 sm:p-6 pb-24 lg:pb-6 max-w-7xl mx-auto space-y-6">
+    <div className="p-4 sm:p-6 lg:px-8 pb-24 lg:pb-6 w-full min-w-0 space-y-6">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
         <h1 className="text-2xl sm:text-3xl font-bold">Learning Analytics</h1>
         <p className="text-text-secondary mt-1">Your adaptive learner profile — built from real behavior, not assumptions</p>
@@ -49,16 +160,37 @@ export function Analytics({ learnerModel, stats, courses }: AnalyticsProps) {
         ))}
       </div>
 
-      {tab === 'overview' && <OverviewTab learnerModel={learnerModel} stats={stats} courses={courses} />}
+      {tab === 'overview' && (
+        <OverviewTab learnerModel={learnerModel} stats={stats} courses={courses} activities={activities} />
+      )}
       {tab === 'mastery' && <MasteryTab learnerModel={learnerModel} courses={courses} />}
       {tab === 'behavior' && <BehaviorTab learnerModel={learnerModel} />}
-      {tab === 'insights' && <InsightsTab learnerModel={learnerModel} />}
+      {tab === 'insights' && (
+        <InsightsTab learnerModel={learnerModel} activities={activities} repairs={prerequisiteRepairs} />
+      )}
     </div>
   );
 }
 
-function OverviewTab({ learnerModel, stats, courses }: { learnerModel: LearnerModel; stats: DashboardStats; courses: Course[] }) {
+function OverviewTab({
+  learnerModel,
+  stats,
+  courses,
+  activities,
+}: {
+  learnerModel: LearnerModel;
+  stats: DashboardStats;
+  courses: Course[];
+  activities: ActivityItem[];
+}) {
   const calibration = computeCalibration(learnerModel.confidenceCalibration);
+  const retentionPoints = retentionCurveFromActivities(activities);
+  const weekly = learnerModel.weeklyMastery.some((v) => v > 0)
+    ? learnerModel.weeklyMastery
+    : weeklyMasteryFromActivities(activities);
+  const hasRetentionData = activities.some(
+    (a) => a.type === 'quiz_passed' || a.type === 'quiz_failed' || a.type === 'review_done',
+  );
   return (
     <div className="space-y-6">
       {calibration && (
@@ -69,10 +201,7 @@ function OverviewTab({ learnerModel, stats, courses }: { learnerModel: LearnerMo
         <div className="rounded-2xl border border-border-subtle bg-surface-card p-6 flex items-center justify-center">
           <ReadinessRing value={learnerModel.overallMastery} size={200} sublabel="Derived from graded first-attempts only — never from self-reported skill." />
         </div>
-        <RetentionCurve dataPoints={[
-          { day: 0, retention: 100 }, { day: 1, retention: 75 }, { day: 3, retention: 58 },
-          { day: 7, retention: 44 }, { day: 14, retention: 33 }, { day: 21, retention: 28 }, { day: 30, retention: 22 },
-        ]} />
+        <RetentionCurve dataPoints={hasRetentionData ? retentionPoints : [{ day: 0, retention: 100 }]} />
       </motion.div>
 
       {/* Metrics */}
@@ -88,10 +217,10 @@ function OverviewTab({ learnerModel, stats, courses }: { learnerModel: LearnerMo
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="rounded-2xl border border-border-subtle bg-surface-card p-5">
           <h3 className="text-sm font-semibold flex items-center gap-2 mb-4"><TrendingUp className="w-4 h-4 text-accent-emerald" />Weekly Mastery Trend</h3>
           <div className="flex items-end gap-1.5 h-28">
-            {learnerModel.weeklyMastery.map((val, i) => (
+            {weekly.map((val, i) => (
               <div key={i} className="flex-1 flex flex-col items-center gap-1">
                 <span className="text-[9px] text-text-muted font-medium">{val}%</span>
-                <div className="w-full rounded-t transition-all duration-500" style={{ height: `${val * 1.2}%`, backgroundColor: i === learnerModel.weeklyMastery.length - 1 ? '#818cf8' : 'var(--viz-track)' }} />
+                <div className="w-full rounded-t transition-all duration-500" style={{ height: `${val * 1.2}%`, backgroundColor: i === weekly.length - 1 ? '#818cf8' : 'var(--viz-track)' }} />
                 <span className="text-[9px] text-text-muted">{['M', 'T', 'W', 'T', 'F', 'S', 'S'][i]}</span>
               </div>
             ))}
@@ -170,38 +299,25 @@ function OverviewTab({ learnerModel, stats, courses }: { learnerModel: LearnerMo
   );
 }
 
-function MasteryTab({ learnerModel }: { learnerModel: LearnerModel; courses: Course[] }) {
+function MasteryTab({ learnerModel, courses }: { learnerModel: LearnerModel; courses: Course[] }) {
+  const graph = buildMasteryGraph(learnerModel, courses);
   return (
     <div className="space-y-6">
       {/* Concept Graph */}
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-        <ConceptGraph
-          nodes={[
-            { id: 'sd', label: 'Supply & Demand', mastery: 92, type: 'concept', x: 120, y: 80 },
-            { id: 'ct', label: 'Consumer Theory', mastery: 78, type: 'theory', x: 300, y: 60 },
-            { id: 'el', label: 'Elasticity', mastery: 45, type: 'formula', x: 120, y: 200 },
-            { id: 'ms', label: 'Market Structures', mastery: 45, type: 'concept', x: 350, y: 180 },
-            { id: 'we', label: 'Welfare Economics', mastery: 20, type: 'theory', x: 530, y: 120 },
-            { id: 'gt', label: 'Game Theory', mastery: 0, type: 'concept', x: 530, y: 280 },
-            { id: 'py', label: 'Python Basics', mastery: 95, type: 'concept', x: 120, y: 330 },
-            { id: 'np', label: 'NumPy', mastery: 82, type: 'concept', x: 300, y: 310 },
-            { id: 'pd', label: 'Pandas', mastery: 70, type: 'concept', x: 450, y: 350 },
-          ]}
-          edges={[
-            { from: 'sd', to: 'ct', relation: 'prerequisite' },
-            { from: 'sd', to: 'el', relation: 'prerequisite' },
-            { from: 'sd', to: 'ms', relation: 'prerequisite' },
-            { from: 'ct', to: 'ms', relation: 'prerequisite' },
-            { from: 'ms', to: 'we', relation: 'prerequisite' },
-            { from: 'ms', to: 'gt', relation: 'prerequisite' },
-            { from: 'el', to: 'we', relation: 'related' },
-            { from: 'py', to: 'np', relation: 'prerequisite' },
-            { from: 'np', to: 'pd', relation: 'prerequisite' },
-          ]}
-          width={660}
-          height={380}
-        />
-      </motion.div>
+      {graph.nodes.length > 0 ? (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+          <ConceptGraph
+            nodes={graph.nodes}
+            edges={graph.edges}
+            width={660}
+            height={Math.max(380, graph.height)}
+          />
+        </motion.div>
+      ) : (
+        <div className="rounded-2xl border border-border-subtle bg-surface-card p-8 text-center text-sm text-text-secondary">
+          Upload your notes and complete a few activities to see your concept mastery map.
+        </div>
+      )}
 
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="rounded-2xl border border-border-subtle bg-surface-card p-5">
@@ -305,14 +421,23 @@ function BehaviorTab({ learnerModel }: { learnerModel: LearnerModel }) {
   );
 }
 
-function InsightsTab({ learnerModel }: { learnerModel: LearnerModel }) {
+function InsightsTab({
+  learnerModel,
+  activities,
+  repairs,
+}: {
+  learnerModel: LearnerModel;
+  activities: ActivityItem[];
+  repairs: PrerequisiteRepair[];
+}) {
+  const tips = adaptiveRecommendations(learnerModel, activities, repairs);
   return (
     <div className="space-y-4">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-5">
         <h3 className="text-sm font-semibold flex items-center gap-2 mb-4"><Lightbulb className="w-4 h-4 text-brand-400" />What We've Learned About Your Learning</h3>
         <p className="text-xs text-text-tertiary mb-4">These insights are discovered from your behavior — not declared by you.</p>
         <div className="space-y-3">
-          {learnerModel.interactionInsights.map((insight, i) => (
+          {(learnerModel.interactionInsights.length > 0 ? learnerModel.interactionInsights : tips.slice(0, 2)).map((insight, i) => (
             <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.08 }}
               className="flex items-start gap-3 p-3 rounded-xl bg-surface-card border border-border-subtle">
               <div className="w-6 h-6 rounded-full bg-brand-500/10 flex items-center justify-center shrink-0 mt-0.5">
@@ -327,10 +452,11 @@ function InsightsTab({ learnerModel }: { learnerModel: LearnerModel }) {
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="rounded-2xl border border-border-subtle bg-surface-card p-5">
         <h3 className="text-sm font-semibold mb-3">Adaptive Recommendations</h3>
         <div className="space-y-2 text-sm text-text-secondary">
-          <p>• Based on your error patterns, try more <strong className="text-text-primary">step-by-step worked examples</strong> for elasticity problems.</p>
-          <p>• Your retention drops significantly after 3 days. <strong className="text-text-primary">Increase review frequency</strong> for recently learned concepts.</p>
-          <p>• You're 23% more accurate on morning sessions. <strong className="text-text-primary">Schedule challenging topics before noon.</strong></p>
-          <p>• Your confidence calibration for Economics is off by ~20%. Use <strong className="text-text-primary">confidence checks</strong> more frequently.</p>
+          {tips.length > 0 ? tips.map((tip, i) => (
+            <p key={i}>• {tip}</p>
+          )) : (
+            <p>Complete lessons and reviews from your uploaded material to unlock personalized recommendations.</p>
+          )}
         </div>
       </motion.div>
     </div>

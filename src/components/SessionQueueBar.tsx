@@ -15,7 +15,7 @@ export function SessionQueueBar({ sessionType, currentIndex, total, onEndSession
 
   return (
     <div className="sticky top-0 z-40 border-b border-brand-500/20 bg-brand-600/10 px-4 py-2">
-      <div className="max-w-4xl mx-auto flex items-center gap-3">
+      <div className="w-full min-w-0 px-4 sm:px-6 flex items-center gap-3">
         <Play className="w-3.5 h-3.5 text-brand-400 shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 mb-1">

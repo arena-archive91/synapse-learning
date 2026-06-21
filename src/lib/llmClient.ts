@@ -7,6 +7,7 @@ export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: stri
 
 const DEFAULT_MODEL = 'gpt-4o-mini';
 const DEFAULT_BASE = 'https://api.openai.com/v1';
+const DEFAULT_EMBED_MODEL = 'text-embedding-3-small';
 
 export function resolveApiKey(settings?: UserSettings): string | null {
   const fromSettings = settings?.openaiApiKey?.trim();
@@ -15,13 +16,54 @@ export function resolveApiKey(settings?: UserSettings): string | null {
   return fromEnv || null;
 }
 
+/**
+ * Phase 6 hook: a managed/self-hosted proxy holds the key server-side, so the
+ * browser needs no key — only the proxy URL. When `llmProxyUrl` is set, requests
+ * route there and the Authorization header is omitted (the proxy injects it).
+ */
+function proxyUrl(settings?: UserSettings): string | null {
+  const p = settings?.llmProxyUrl?.trim();
+  return p ? p.replace(/\/$/, '') : null;
+}
+
 export function isLlmAvailable(settings?: UserSettings): boolean {
   if (settings?.useLlm === false) return false;
-  return !!resolveApiKey(settings);
+  return !!resolveApiKey(settings) || !!proxyUrl(settings);
 }
 
 function baseUrl(settings?: UserSettings): string {
-  return settings?.llmBaseUrl?.replace(/\/$/, '') || DEFAULT_BASE;
+  return proxyUrl(settings) || settings?.llmBaseUrl?.replace(/\/$/, '') || DEFAULT_BASE;
+}
+
+/** Auth header — proxy JWT when logged in, else direct API key. */
+function authHeaders(settings?: UserSettings): Record<string, string> {
+  if (settings?.authToken?.trim()) {
+    return { Authorization: `Bearer ${settings.authToken.trim()}` };
+  }
+  if (proxyUrl(settings)) return {};
+  const key = resolveApiKey(settings);
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+/**
+ * Embed texts via the OpenAI-compatible /embeddings endpoint. Returns null when
+ * unavailable or on any failure, so callers degrade to lexical retrieval.
+ */
+export async function embedTexts(texts: string[], settings?: UserSettings): Promise<number[][] | null> {
+  if (!isLlmAvailable(settings) || texts.length === 0) return null;
+  try {
+    const res = await fetch(`${baseUrl(settings)}/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(settings) },
+      body: JSON.stringify({ model: DEFAULT_EMBED_MODEL, input: texts }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: { embedding?: number[] }[] };
+    const out = data.data?.map((d) => d.embedding ?? []);
+    return out && out.length === texts.length && out.every((e) => e.length > 0) ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 function model(settings?: UserSettings): string {
@@ -33,14 +75,13 @@ export async function chatCompletion(
   settings?: UserSettings,
   opts?: { temperature?: number; maxTokens?: number },
 ): Promise<string> {
-  const apiKey = resolveApiKey(settings);
-  if (!apiKey) throw new Error('No API key configured');
+  if (!isLlmAvailable(settings)) throw new Error('No API key or proxy configured');
 
   const res = await fetch(`${baseUrl(settings)}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      ...authHeaders(settings),
     },
     body: JSON.stringify({
       model: model(settings),
@@ -69,14 +110,13 @@ export async function streamChatCompletion(
   onDelta: (chunk: string, fullText: string) => void,
   opts?: { temperature?: number; maxTokens?: number },
 ): Promise<string> {
-  const apiKey = resolveApiKey(settings);
-  if (!apiKey) throw new Error('No API key configured');
+  if (!isLlmAvailable(settings)) throw new Error('No API key or proxy configured');
 
   const res = await fetch(`${baseUrl(settings)}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      ...authHeaders(settings),
     },
     body: JSON.stringify({
       model: model(settings),
@@ -151,15 +191,24 @@ const MODE_SYSTEM: Record<AgentMode, string> = {
 function buildAgentSystemPrompt(
   mode: AgentMode,
   settings?: UserSettings,
-  context?: { taskTitle?: string; concept?: string; courses?: string[] },
+  context?: {
+    taskTitle?: string;
+    concept?: string;
+    courses?: string[];
+    sourceExcerpt?: string;
+  },
 ): string {
   const lang = settings?.language === 'el' ? 'Greek' : 'English';
   const tone = settings ? agentTonePrefix(settings) : '';
+  const strictSources = settings?.sourceMode === 'strict' || settings?.sourceMode === 'notes-only';
+  const sourceBlock = context?.sourceExcerpt
+    ? `\nLearner material excerpt (prioritize this${strictSources ? ' — do not invent facts beyond it' : ''}):\n---\n${context.sourceExcerpt}\n---`
+    : '';
   return `${MODE_SYSTEM[mode] ?? MODE_SYSTEM.direct}
 Respond in ${lang}. ${tone}
 Keep responses under 250 words unless the user asks for depth.
 ${context?.concept ? `Current concept: ${context.concept}.` : ''}
-${context?.taskTitle ? `Active task: ${context.taskTitle}.` : ''}`;
+${context?.taskTitle ? `Active task: ${context.taskTitle}.` : ''}${sourceBlock}`;
 }
 
 function offlineAgentReply(input: string, mode: AgentMode): string {
@@ -176,13 +225,19 @@ export async function streamAgentReply(
   input: string,
   mode: AgentMode,
   settings: UserSettings | undefined,
-  context: { taskTitle?: string; concept?: string; courses?: string[] } | undefined,
+  context: {
+    taskTitle?: string;
+    concept?: string;
+    courses?: string[];
+    sourceExcerpt?: string;
+  } | undefined,
   onDelta: (fullText: string) => void,
-): Promise<{ content: string; usedLlm: boolean }> {
+): Promise<{ content: string; usedLlm: boolean; sourceGrounded: boolean }> {
+  const sourceGrounded = !!context?.sourceExcerpt;
   if (!isLlmAvailable(settings)) {
     const content = offlineAgentReply(input, mode);
     onDelta(content);
-    return { content, usedLlm: false };
+    return { content, usedLlm: false, sourceGrounded };
   }
 
   const system = buildAgentSystemPrompt(mode, settings, context);
@@ -195,11 +250,11 @@ export async function streamAgentReply(
       settings,
       (_chunk, full) => onDelta(full),
     );
-    return { content, usedLlm: true };
+    return { content, usedLlm: true, sourceGrounded };
   } catch {
     const content = offlineAgentReply(input, mode);
     onDelta(content);
-    return { content, usedLlm: false };
+    return { content, usedLlm: false, sourceGrounded };
   }
 }
 
@@ -207,10 +262,16 @@ export async function generateAgentReply(
   input: string,
   mode: AgentMode,
   settings?: UserSettings,
-  context?: { taskTitle?: string; concept?: string; courses?: string[] },
-): Promise<{ content: string; usedLlm: boolean }> {
+  context?: {
+    taskTitle?: string;
+    concept?: string;
+    courses?: string[];
+    sourceExcerpt?: string;
+  },
+): Promise<{ content: string; usedLlm: boolean; sourceGrounded: boolean }> {
+  const sourceGrounded = !!context?.sourceExcerpt;
   if (!isLlmAvailable(settings)) {
-    return { content: offlineAgentReply(input, mode), usedLlm: false };
+    return { content: offlineAgentReply(input, mode), usedLlm: false, sourceGrounded };
   }
 
   const system = buildAgentSystemPrompt(mode, settings, context);
@@ -223,9 +284,9 @@ export async function generateAgentReply(
       ],
       settings,
     );
-    return { content, usedLlm: true };
+    return { content, usedLlm: true, sourceGrounded };
   } catch {
-    return { content: offlineAgentReply(input, mode), usedLlm: false };
+    return { content: offlineAgentReply(input, mode), usedLlm: false, sourceGrounded };
   }
 }
 
@@ -235,8 +296,9 @@ export async function generateFeynmanCoachFeedbackAsync(
   weakDims: RubricDimension[],
   concept: string,
   settings?: UserSettings,
+  referenceNotes?: string,
 ): Promise<{ feedback: CoachFeedback; usedLlm: boolean }> {
-  const offline = generateFeynmanCoachFeedback(text, scores, weakDims, concept, settings);
+  const offline = generateFeynmanCoachFeedback(text, scores, weakDims, concept, settings, referenceNotes);
 
   if (!isLlmAvailable(settings) || text.trim().split(/\s+/).length < 8) {
     return { feedback: offline, usedLlm: false };
@@ -263,7 +325,7 @@ NEXT: one concrete next step`,
         },
         {
           role: 'user',
-          content: `Learner explanation (${avg}% rubric: accuracy ${scores.accuracy}, completeness ${scores.completeness}, simplicity ${scores.simplicity}, structure ${scores.structure}):\n\n${text}`,
+          content: `Learner explanation (${avg}% rubric: accuracy ${scores.accuracy}, completeness ${scores.completeness}, simplicity ${scores.simplicity}, structure ${scores.structure}):\n\n${text}${referenceNotes?.trim() ? `\n\nReference notes excerpt:\n${referenceNotes.slice(0, 1200)}` : ''}`,
         },
       ],
       settings,

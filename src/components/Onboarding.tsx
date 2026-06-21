@@ -14,6 +14,7 @@ interface OnboardingProps {
     dailyGoalMinutes?: number;
     examDate?: string;
     openUpload?: boolean;
+    displayName?: string;
   }) => void;
 }
 
@@ -42,6 +43,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [selectedGoals, setSelectedGoals] = useState<string[]>([]);
   const [dailyTime, setDailyTime] = useState(30);
   const [examDate, setExamDate] = useState('');
+  const [displayName, setDisplayName] = useState('');
 
   const stepIndex = ['welcome', 'role', 'goals', 'preferences', 'upload'].indexOf(step);
   const progress = ((stepIndex + 1) / 5) * 100;
@@ -81,7 +83,21 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                   Let's personalize your learning experience. This takes about 60 seconds.
                   The adaptive engine will also learn from your behavior over time.
                 </p>
-                <button onClick={next} className="inline-flex items-center gap-2 px-8 py-3 bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-xl font-medium hover:from-brand-500 hover:to-brand-400 transition-all">
+                <div className="max-w-sm mx-auto text-left">
+                  <label className="block text-xs font-medium text-text-tertiary mb-1.5" htmlFor="onb-name">
+                    What should we call you? <span className="text-text-muted">(optional)</span>
+                  </label>
+                  <input
+                    id="onb-name"
+                    type="text"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder="Your name"
+                    autoComplete="name"
+                    className="w-full px-4 py-2.5 rounded-xl bg-surface-input border border-border-subtle text-sm text-text-primary focus:outline-none focus:border-brand-500/50"
+                  />
+                </div>
+                <button onClick={next} data-testid="onboarding-continue" className="inline-flex items-center gap-2 px-8 py-3 bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-xl font-medium hover:from-brand-500 hover:to-brand-400 transition-all">
                   Let's Go <ArrowRight className="w-4 h-4" />
                 </button>
               </motion.div>
@@ -183,6 +199,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                     dailyGoalMinutes: dailyTime,
                     examDate: examDate || undefined,
                     openUpload: true,
+                    displayName: displayName.trim() || undefined,
                   })} className="inline-flex items-center justify-center gap-2 px-8 py-3 bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-xl font-medium hover:from-brand-500 hover:to-brand-400 transition-all">
                     <Upload className="w-4 h-4" /> Upload My First Material
                   </button>
@@ -191,6 +208,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                     goals: selectedGoals,
                     dailyGoalMinutes: dailyTime,
                     examDate: examDate || undefined,
+                    displayName: displayName.trim() || undefined,
                   })} className="text-sm text-text-secondary hover:text-text-primary transition-colors">
                     Skip — explore the demo first
                   </button>
@@ -207,7 +225,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
           <button onClick={prev} className="flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary"><ArrowLeft className="w-4 h-4" /> Back</button>
         ) : <div />}
         {step !== 'upload' && step !== 'welcome' && (
-          <button onClick={next} className="flex items-center gap-2 px-5 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-medium transition-all">
+          <button onClick={next} data-testid="onboarding-next" className="flex items-center gap-2 px-5 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-medium transition-all">
             Continue <ArrowRight className="w-4 h-4" />
           </button>
         )}

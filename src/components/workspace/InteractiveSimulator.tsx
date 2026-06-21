@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { ArrowRight, SlidersHorizontal, Target, Zap } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { useI18n } from '../../lib/i18n';
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 const PRESET_KEYS = [
   { id: 'baseline', key: 'presetBaseline' as const, demand: 0, supply: 0 },
@@ -14,7 +15,14 @@ const PRESET_KEYS = [
 const CHALLENGE_TARGET_P = 55;
 const CHALLENGE_TOLERANCE = 3;
 
-export function InteractiveSimulator() {
+interface Props {
+  insight?: string;
+  economicsMode?: boolean;
+  emptyMessage?: string;
+  onUpload?: () => void;
+}
+
+export function InteractiveSimulator({ insight, economicsMode = false, emptyMessage, onUpload }: Props) {
   const { t } = useI18n();
   const [demandShift, setDemandShift] = useState(0);
   const [supplyShift, setSupplyShift] = useState(0);
@@ -43,6 +51,30 @@ export function InteractiveSimulator() {
   const sQ2 = sP2 + supplyShift;
 
   const presetButtons = useMemo(() => PRESET_KEYS, []);
+
+  if (!economicsMode) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex items-center justify-between border-b border-border-subtle bg-surface-card px-4 py-2.5 shrink-0">
+          <span className="flex items-center gap-2 text-sm font-semibold">
+            <SlidersHorizontal className="w-4 h-4 text-brand-400" />
+            {t('parametricSandbox')}
+          </span>
+        </div>
+        <div className="flex flex-1 flex-col items-center justify-center p-6">
+          <WorkspaceEmptyState
+            message={emptyMessage ?? (insight || t('sandboxInsight'))}
+            onUpload={onUpload}
+          />
+          {insight && (
+            <div className="mt-4 w-full max-w-2xl rounded-xl border border-accent-cyan/25 bg-accent-cyan/5 p-4 text-left text-xs text-text-secondary leading-relaxed">
+              {insight}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -169,7 +201,7 @@ export function InteractiveSimulator() {
 
         <div className="mt-4 flex w-full max-w-sm items-start gap-2 rounded-lg border border-brand-500/30 bg-brand-500/12 p-3.5 text-sm text-brand-200">
           <Zap className="mt-0.5 w-4 h-4 shrink-0" />
-          <p>{t('sandboxInsight')}</p>
+          <p>{insight ?? t('sandboxInsight')}</p>
         </div>
       </div>
     </div>

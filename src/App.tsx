@@ -1,9 +1,16 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, lazy, Suspense, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore } from './store/useStore';
 import { applyTheme, watchSystemTheme } from './lib/theme';
 import { I18nContext, t as translate, type I18nKey } from './lib/i18n';
-import { getTaskConcept, getReviewCards, getWorkspaceTool, getMistakesForTask, getExamQuestions, getExamDurationSeconds, getPrerequisiteSteps, findPendingTask } from './lib/taskFlows';
+import { getTaskConcept, getWorkspaceTool, getMistakesForTask, getExamDurationSeconds, findPendingTask } from './lib/taskFlows';
+import {
+  buildTaskFlowContext,
+  resolveExamQuestions,
+  resolvePrerequisiteCheckpoint,
+  resolvePrerequisiteSteps,
+  resolveReviewCards,
+} from './lib/taskFlowContent';
 import { CommandPalette, useCommandPalette } from './components/CommandPalette';
 import { NotificationsPanel } from './components/NotificationsPanel';
 import { MistakeRetryView } from './components/MistakeRetryView';
@@ -16,17 +23,23 @@ import { Shell } from './components/Shell';
 import { Dashboard } from './components/Dashboard';
 import { Library } from './components/Library';
 import { Tasks } from './components/Tasks';
-import { Agent } from './components/Agent';
 import { CourseView } from './components/CourseView';
-import { Analytics } from './components/Analytics';
 import { Settings } from './components/Settings';
 import { UploadModal } from './components/UploadModal';
-import { LessonView } from './components/LessonView';
-import { PracticalLessonView } from './components/PracticalLessonView';
-import { StudyWorkspace } from './components/workspace/StudyWorkspace';
-import { ReviewSessionView } from './components/ReviewSessionView';
 import type { AppView } from './types';
 import type { FsrsRating } from './lib/pedagogy';
+import { visibleCourses } from './lib/demoMode';
+
+const Agent = lazy(() => import('./components/Agent').then((m) => ({ default: m.Agent })));
+const Analytics = lazy(() => import('./components/Analytics').then((m) => ({ default: m.Analytics })));
+const LessonView = lazy(() => import('./components/LessonView').then((m) => ({ default: m.LessonView })));
+const PracticalLessonView = lazy(() => import('./components/PracticalLessonView').then((m) => ({ default: m.PracticalLessonView })));
+const StudyWorkspace = lazy(() => import('./components/workspace/StudyWorkspace').then((m) => ({ default: m.StudyWorkspace })));
+const ReviewSessionView = lazy(() => import('./components/ReviewSessionView').then((m) => ({ default: m.ReviewSessionView })));
+
+function LazyOverlay({ children }: { children: ReactNode }) {
+  return <Suspense fallback={null}>{children}</Suspense>;
+}
 
 export default function App() {
   const store = useAppStore();
@@ -74,11 +87,24 @@ export default function App() {
   };
 
   const taskConcept = store.activeTask ? getTaskConcept(store.activeTask) : undefined;
+  const taskFlowCtx = useMemo(
+    () => buildTaskFlowContext({
+      uploadedFiles: store.uploadedFiles,
+      glossaryEntries: store.glossaryEntries,
+      courses: store.courses,
+      courseId: store.activeTask?.courseId,
+      lang: store.user.settings.language,
+    }),
+    [store.uploadedFiles, store.glossaryEntries, store.courses, store.activeTask?.courseId, store.user.settings.language],
+  );
   const workspaceTool = store.activeTask ? getWorkspaceTool(store.activeTask) : undefined;
-  const reviewCards = taskConcept ? getReviewCards(taskConcept) : undefined;
-  const examQuestions = taskConcept ? getExamQuestions(taskConcept) : undefined;
+  const reviewCards = taskConcept ? resolveReviewCards(taskConcept, taskFlowCtx) : undefined;
+  const examQuestions = taskConcept ? resolveExamQuestions(taskConcept, taskFlowCtx) : undefined;
   const examDuration = store.activeTask ? getExamDurationSeconds(store.activeTask.estimatedMinutes) : 180;
-  const prerequisiteSteps = taskConcept ? getPrerequisiteSteps(taskConcept) : undefined;
+  const prerequisiteSteps = taskConcept
+    ? resolvePrerequisiteSteps(taskConcept, taskFlowCtx, store.pedagogyMetrics.repairs[0]?.concept)
+    : undefined;
+  const prerequisiteCheckpoint = taskConcept ? resolvePrerequisiteCheckpoint(taskConcept, taskFlowCtx) : undefined;
   const prerequisiteTarget = store.pedagogyMetrics.repairs[0]?.concept;
   const taskMistakes = store.activeTask
     ? getMistakesForTask(store.activeTask, store.openMistakes)
@@ -129,51 +155,59 @@ export default function App() {
         onClose={() => setNotificationsOpen(false)}
         activities={store.activities}
       />
-      <UploadModal
-        isOpen={store.showUploadModal}
-        onClose={() => store.setShowUploadModal(false)}
-        onUpload={store.simulateUpload}
-        onProcessUpload={store.processUpload}
-        onProceed={() => store.navigate('library')}
-      />
       {store.activeLessonView && (
+        <LazyOverlay>
         <LessonView
           onClose={closeLessonView}
           onOpenAgent={() => { store.setActiveLessonView(false); store.navigate('agent'); }}
           onComplete={completeActiveTask}
-          onQuizAttempt={store.recordQuizAttempt}
-          onPracticeAttempt={(concept, correct) => store.recordQuizAttempt(concept, correct, 70)}
+          onQuizAttempt={(c, corr, conf, sk) => store.recordQuizAttempt(c, corr, conf, sk, store.activeTask?.courseId)}
           taskTitle={store.activeTask?.title}
           courseName={store.activeTask?.courseName}
           quizConcept={taskConcept}
           xpReward={store.activeTask?.xpReward}
           taskId={store.activeTaskId ?? undefined}
+          courseId={store.activeTask?.courseId}
           settings={store.user.settings}
           overallMastery={Math.round(store.learnerModel.overallMastery)}
           streak={store.dashboardStats.streak}
           onStartNextTask={() => { if (nextPendingTask) store.startTask(nextPendingTask.id); }}
+          uploadedFiles={store.uploadedFiles}
+          glossaryEntries={store.glossaryEntries}
+          courses={store.courses}
+          onUpload={() => store.setShowUploadModal(true)}
         />
+        </LazyOverlay>
       )}
       {store.practicalLessonView && (
+        <LazyOverlay>
         <PracticalLessonView
           onClose={closePracticalView}
           onOpenAgent={() => { store.setPracticalLessonView(false); store.navigate('agent'); }}
           onComplete={completeActiveTask}
-          onPracticeAttempt={(concept, correct) => store.recordQuizAttempt(concept, correct, 70)}
+          onPracticeAttempt={(concept, correct) => store.recordQuizAttempt(concept, correct, 70, undefined, store.activeTask?.courseId)}
           taskTitle={store.activeTask?.title}
           courseName={store.activeTask?.courseName}
           quizConcept={taskConcept}
           xpReward={store.activeTask?.xpReward}
+          uploadedFiles={store.uploadedFiles}
+          glossaryEntries={store.glossaryEntries}
+          courses={store.courses}
+          courseId={store.activeTask?.courseId}
+          lang={store.user.settings.language}
+          onUpload={() => store.setShowUploadModal(true)}
         />
+        </LazyOverlay>
       )}
       {store.studyWorkspaceOpen && (
+        <LazyOverlay>
         <StudyWorkspace
-          key={store.activeTaskId ?? 'free'}
+          key={`${store.activeTaskId ?? store.selectedCourse?.id ?? 'free'}-${store.uploadedFiles.length}`}
           onClose={closeWorkspace}
           onOpenAgent={() => { store.setStudyWorkspaceOpen(false); store.navigate('agent'); }}
           onComplete={completeActiveTask}
           taskTitle={store.activeTask?.title}
-          courseName={store.activeTask?.courseName}
+          courseName={store.activeTask?.courseName ?? store.selectedCourse?.title}
           quizConcept={taskConcept}
           xpReward={store.activeTask?.xpReward}
           initialTool={workspaceTool}
@@ -182,13 +216,23 @@ export default function App() {
           dashboardStats={store.dashboardStats}
           conceptBars={store.pedagogyMetrics.conceptBars}
           uploadedFiles={store.uploadedFiles}
+          glossaryEntries={store.glossaryEntries}
+          courses={store.courses}
+          courseId={store.activeTask?.courseId ?? store.selectedCourse?.id}
           tasks={store.tasks}
-          onQuizAttempt={store.recordQuizAttempt}
+          onQuizAttempt={(c, corr, conf, sk) => store.recordQuizAttempt(c, corr, conf, sk, store.activeTask?.courseId)}
+          onLeitnerRate={(concept, rating) => store.submitLeitnerRating(concept, rating, store.activeTask?.courseId ?? store.selectedCourse?.id)}
           onLogStudyMinutes={store.logStudyMinutes}
           userSettings={store.user.settings}
+          onUpload={() => store.setShowUploadModal(true)}
+          sourceHighlight={store.sourceHighlight}
+          openSourceAt={store.openSourceAt}
+          clearSourceHighlight={store.clearSourceHighlight}
         />
+        </LazyOverlay>
       )}
       {store.reviewSessionOpen && (
+        <LazyOverlay>
         <ReviewSessionView
           onClose={closeReviewSession}
           onOpenAgent={() => { store.setReviewSessionOpen(false); store.navigate('agent'); }}
@@ -199,6 +243,7 @@ export default function App() {
           xpReward={store.activeTask?.xpReward}
           cards={reviewCards}
         />
+        </LazyOverlay>
       )}
       {store.mistakeRetryOpen && (
         <MistakeRetryView
@@ -222,7 +267,7 @@ export default function App() {
           onClose={() => { store.setExamPrepOpen(false); store.setActiveTaskId(null); }}
           onOpenAgent={() => { store.setExamPrepOpen(false); store.navigate('agent'); }}
           onComplete={completeActiveTask}
-          onQuizAttempt={store.recordQuizAttempt}
+          onQuizAttempt={(c, corr, conf) => store.recordQuizAttempt(c, corr, conf, undefined, store.activeTask?.courseId)}
           taskTitle={store.activeTask?.title}
           courseName={store.activeTask?.courseName}
           quizConcept={taskConcept}
@@ -240,15 +285,30 @@ export default function App() {
             store.navigate('agent');
           }}
           onComplete={completeActiveTask}
-          onQuizAttempt={store.recordQuizAttempt}
+          onQuizAttempt={(c, corr, conf) => store.recordQuizAttempt(c, corr, conf, undefined, store.activeTask?.courseId)}
           taskTitle={store.activeTask?.title}
           courseName={store.activeTask?.courseName}
           quizConcept={taskConcept}
           targetConcept={prerequisiteTarget}
           xpReward={store.activeTask?.xpReward}
           steps={prerequisiteSteps}
+          checkpoint={prerequisiteCheckpoint}
         />
       )}
+      <UploadModal
+        isOpen={store.showUploadModal}
+        onClose={() => store.setShowUploadModal(false)}
+        onUpload={() => {}}
+        onProcessUpload={store.processUpload}
+        onUploadComplete={(course) => {
+          store.setSelectedCourse(course);
+          store.setStudyWorkspaceOpen(true);
+        }}
+        onProceed={() => {
+          /* Navigation handled in onUploadComplete after successful upload */
+        }}
+        courses={visibleCourses(store.courses, store.user.settings)}
+      />
     </>
   );
 
@@ -266,6 +326,14 @@ export default function App() {
     if (store.user.settings.theme !== 'system') return;
     return watchSystemTheme(() => applyTheme('system'));
   }, [store.user.settings.theme]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('billing') !== 'success' || !store.user.settings.authToken) return;
+    void store.refreshAuthPlan().finally(() => {
+      window.history.replaceState({}, '', window.location.pathname);
+    });
+  }, [store.user.settings.authToken, store.refreshAuthPlan]);
 
   // Landing page
   if (store.currentView === 'landing') {
@@ -327,7 +395,7 @@ export default function App() {
           )}
           {store.currentView === 'library' && (
             <Library
-              courses={store.courses}
+              courses={visibleCourses(store.courses, store.user.settings)}
               uploadedFiles={store.uploadedFiles}
               onSelectCourse={(course) => { store.setSelectedCourse(course); store.navigate('course'); }}
               onUpload={() => store.setShowUploadModal(true)}
@@ -348,6 +416,7 @@ export default function App() {
             />
           )}
           {store.currentView === 'agent' && (
+            <LazyOverlay>
             <Agent
               messages={store.agentMessages}
               mode={store.agentMode}
@@ -360,13 +429,33 @@ export default function App() {
               xpReward={store.activeTask?.xpReward}
               onCompleteTask={store.activeTaskId ? completeAgentTask : undefined}
               settings={store.user.settings}
+              uploadedFiles={store.uploadedFiles}
+              onGoToSource={store.openSourceAt}
+              lang={store.user.settings.language}
             />
+            </LazyOverlay>
           )}
           {store.currentView === 'analytics' && (
-            <Analytics learnerModel={store.learnerModel} stats={store.dashboardStats} courses={store.courses} />
+            <LazyOverlay>
+            <Analytics
+              learnerModel={store.learnerModel}
+              stats={store.dashboardStats}
+              courses={store.courses}
+              activities={store.activities}
+              prerequisiteRepairs={store.pedagogyMetrics.repairs}
+            />
+            </LazyOverlay>
           )}
           {store.currentView === 'settings' && (
-            <Settings settings={store.user.settings} onUpdate={store.updateSettings} />
+            <Settings
+              settings={store.user.settings}
+              onUpdate={store.updateSettings}
+              onPullLibrary={store.pullLibraryFromServer}
+              onPullSession={store.pullSessionFromServer}
+              onPushSession={store.pushSessionToServer}
+              onSyncAccount={store.syncAccountOnLogin}
+              onRefreshPlan={store.refreshAuthPlan}
+            />
           )}
         </motion.div>
       </AnimatePresence>

@@ -1,9 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useState, useMemo } from 'react';
 import { Sparkles, Bot, Loader2 } from 'lucide-react';
 import { computeRubric, weakestDimensions, type RubricDimension } from '../../lib/feynmanRubric';
 import { generateFeynmanCoachFeedbackAsync, isLlmAvailable } from '../../lib/llmClient';
 import type { CoachFeedback } from '../../lib/feynmanCoach';
-import { FEYNMAN_OUTLINE, FEYNMAN_PLACEHOLDER } from '../../lib/domainContent';
 import { useI18n } from '../../lib/i18n';
 import type { UserSettings } from '../../types';
 
@@ -14,41 +13,71 @@ const RUBRIC_LABELS: Record<RubricDimension, string> = {
   structure: 'Structure',
 };
 
-const RUBRIC_GAPS: Record<RubricDimension, string> = {
-  accuracy: 'Use precise terms: Cournot, Bertrand, marginal cost, Nash equilibrium.',
-  completeness: 'Cover both models and explain when each applies.',
-  simplicity: 'Shorten sentences — aim for one idea per sentence.',
-  structure: 'Add causal links (because/when) and a concrete example.',
-};
+function rubricGapHint(dim: RubricDimension, concept: string, lang: 'en' | 'el'): string {
+  const t = (en: string, el: string) => (lang === 'el' ? el : en);
+  const map: Record<RubricDimension, string> = {
+    accuracy: t(`Use precise terms for «${concept}» from your notes.`, `Χρησιμοποίησε ακριβείς όρους για «${concept}» από τις σημειώσεις.`),
+    completeness: t('Cover mechanism, importance, and one example from your material.', 'Κάλυψε μηχανισμό, σημασία και ένα παράδειγμα από το υλικό σου.'),
+    simplicity: t('One idea per sentence — reduce jargon.', 'Μία ιδέα ανά πρόταση — λιγότερο jargon.'),
+    structure: t('Use a clear arc: idea → why → example → takeaway.', 'Δομή: ιδέα → γιατί → παράδειγμα → σύνοψη.'),
+  };
+  return map[dim];
+}
 
-const CONCEPT_LINKS: Record<RubricDimension, string> = {
-  accuracy: 'gt',
-  completeness: 'ms',
-  simplicity: 'ct',
-  structure: 'el',
-};
+const DEFAULT_OUTLINE = (concept: string, lang: 'en' | 'el') =>
+  lang === 'el'
+    ? [`Ποια είναι η βασική ιδέα του «${concept}»;`, 'Γιατί έχει σημασία;', 'Ποια παρανόηση να αποφύγεις;', 'Παράδειγμα από τις σημειώσεις σου.']
+    : [`What is the core idea of ${concept}?`, 'Why does it matter?', 'What misconception to avoid?', 'One example from your notes.'];
 
 interface Props {
   concept?: string;
   onFocusConcept?: (conceptId: string) => void;
   settings?: UserSettings;
   onOpenAgent?: () => void;
+  outline?: string[];
+  placeholder?: string;
+  gapHints?: string[];
+  /** Uploaded note excerpt for coach grounding (not the user's draft). */
+  referenceNotes?: string;
+  /** Glossary terms from the source corpus — used to score accuracy fairly. */
+  glossary?: Array<{ term: string; definition?: string }>;
+  /** Additional course/topic terms that should count as keywords. */
+  extraTerms?: string[];
 }
-
-export function FeynmanCheck({ concept = 'Market Structures', onFocusConcept, settings, onOpenAgent }: Props) {
+export function FeynmanCheck({
+  concept = 'Study concept',
+  onFocusConcept,
+  settings,
+  onOpenAgent,
+  outline: outlineProp,
+  placeholder: placeholderProp,
+  gapHints,
+  referenceNotes = '',
+  glossary,
+  extraTerms,
+}: Props) {
   const { t, lang } = useI18n();
   const [text, setText] = useState('');
   const [coachFeedback, setCoachFeedback] = useState<CoachFeedback | null>(null);
   const [coachUsedLlm, setCoachUsedLlm] = useState(false);
   const [coachLoading, setCoachLoading] = useState(false);
   const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-  const outline = FEYNMAN_OUTLINE[lang];
-
+  const outline = outlineProp ?? DEFAULT_OUTLINE(concept, lang);
+  const placeholder = placeholderProp ?? (
+    lang === 'el'
+      ? `Εξήγησε την έννοια «${concept}» με δικά σου λόγια, βασιζόμενος/η στις σημειώσεις σου…`
+      : `Explain ${concept} in your own words, using your uploaded notes…`
+  );
   const rubric = useMemo(() => {
     if (wordCount < 8) return null;
-    const scores = computeRubric(text, wordCount);
+    const scores = computeRubric(text, wordCount, {
+      concept,
+      referenceNotes,
+      glossary,
+      extraTerms,
+    });
     return { scores, weak: weakestDimensions(scores) };
-  }, [text, wordCount]);
+  }, [text, wordCount, concept, referenceNotes, glossary, extraTerms]);
 
   const requestCoach = async () => {
     if (!rubric) return;
@@ -60,8 +89,8 @@ export function FeynmanCheck({ concept = 'Market Structures', onFocusConcept, se
       rubric.weak,
       concept,
       settings,
-    );
-    setCoachFeedback(feedback);
+      referenceNotes,
+    );    setCoachFeedback(feedback);
     setCoachUsedLlm(usedLlm);
     setCoachLoading(false);
   };
@@ -96,7 +125,7 @@ export function FeynmanCheck({ concept = 'Market Structures', onFocusConcept, se
               value={text}
               onChange={(e) => { setText(e.target.value); setCoachFeedback(null); }}
               rows={7}
-              placeholder={FEYNMAN_PLACEHOLDER[lang]}
+              placeholder={placeholder}
               className="w-full rounded-xl border border-border-subtle bg-surface-primary p-3 text-sm leading-6 outline-none placeholder:text-text-muted focus:border-brand-500/40"
             />
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -168,10 +197,9 @@ export function FeynmanCheck({ concept = 'Market Structures', onFocusConcept, se
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Gaps to fix</p>
                 {rubric.weak.map((dim) => (
                   <div key={dim} className="rounded-lg border border-border-subtle bg-surface-primary/50 p-2.5 text-[11px] leading-5 text-text-secondary">
-                    <p>{RUBRIC_GAPS[dim]}</p>
+                    <p>{gapHints?.[0] ?? rubricGapHint(dim, concept, lang)}</p>
                     {onFocusConcept && (
-                      <button type="button" onClick={() => onFocusConcept(CONCEPT_LINKS[dim])}
-                        className="mt-1.5 text-[10px] font-medium text-brand-400 hover:text-brand-300">
+                      <button type="button" onClick={() => onFocusConcept('concept-map')}                        className="mt-1.5 text-[10px] font-medium text-brand-400 hover:text-brand-300">
                         Open related concept →
                       </button>
                     )}

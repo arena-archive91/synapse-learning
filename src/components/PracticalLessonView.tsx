@@ -3,12 +3,14 @@ import { motion } from 'framer-motion';
 import {
   X, Play, CheckCircle2, AlertTriangle, Lightbulb,
   ChevronRight, ArrowRight, Sparkles, RotateCcw,
-  Terminal, Eye, Gauge, Zap
+  Terminal, Eye, Gauge, Zap, Upload,
 } from 'lucide-react';
 import { cn } from '../utils/cn';
-import { getPracticeExercises } from '../lib/practiceExercises';
+import { CodeEditor } from './CodeEditor';
+import { buildPracticeExercisesFromNotes, getPracticeExercises } from '../lib/practiceExercises';
 import { getPyodide, runPythonCode, validatePythonExercise } from '../lib/pyodideRunner';
-import { useI18n } from '../lib/i18n';
+import { useI18n, type Lang } from '../lib/i18n';
+import type { Course, GlossaryEntry, UploadedFile } from '../types';
 
 interface PracticalLessonViewProps {
   onClose: () => void;
@@ -19,6 +21,12 @@ interface PracticalLessonViewProps {
   courseName?: string;
   quizConcept?: string;
   xpReward?: number;
+  uploadedFiles?: UploadedFile[];
+  glossaryEntries?: GlossaryEntry[];
+  courses?: Course[];
+  courseId?: string;
+  lang?: Lang;
+  onUpload?: () => void;
 }
 
 export function PracticalLessonView({
@@ -28,33 +36,72 @@ export function PracticalLessonView({
   onPracticeAttempt,
   taskTitle,
   courseName,
-  quizConcept = 'Pandas GroupBy',
+  quizConcept = 'Study topic',
   xpReward = 40,
+  uploadedFiles = [],
+  glossaryEntries = [],
+  courses = [],
+  courseId,
+  lang: langProp,
+  onUpload,
 }: PracticalLessonViewProps) {
-  const { t } = useI18n();
-  const exercises = useMemo(() => getPracticeExercises(quizConcept), [quizConcept]);
-  const [exerciseIdx, setExerciseIdx] = useState(0);
-  const exercise = exercises[exerciseIdx] ?? exercises[0]!;
+  const { t, lang: i18nLang } = useI18n();
+  const lang = langProp ?? i18nLang;
 
-  const [code, setCode] = useState(exercise.starterCode);
+  const noteExercises = useMemo(
+    () => buildPracticeExercisesFromNotes({
+      uploadedFiles,
+      glossaryEntries,
+      courses,
+      courseId,
+      concept: quizConcept,
+      lang,
+    }),
+    [uploadedFiles, glossaryEntries, courses, courseId, quizConcept, lang],
+  );
+
+  const exercises = useMemo(
+    () => getPracticeExercises(quizConcept, noteExercises),
+    [quizConcept, noteExercises],
+  );
+
+  const hasNoteSource = noteExercises.length > 0;
+  const [exerciseIdx, setExerciseIdx] = useState(0);
+  const exercise = exercises[exerciseIdx] ?? exercises[0];
+
+  const [code, setCode] = useState(exercise?.starterCode ?? '');
   const [output, setOutput] = useState('');
   const [hintLevel, setHintLevel] = useState(0);
   const [testsPassed, setTestsPassed] = useState<boolean | null>(null);
   const [showSolution, setShowSolution] = useState(false);
   const [completedCount, setCompletedCount] = useState(0);
   const [pyodideStatus, setPyodideStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const isPandas = quizConcept.toLowerCase().includes('pandas') || quizConcept.toLowerCase().includes('groupby');
+
+  const isPythonExercise = useMemo(
+    () => exercise ? /\b(import |def |pandas|pd\.|numpy|np\.)/.test(exercise.starterCode + exercise.solution) : false,
+    [exercise],
+  );
 
   useEffect(() => {
-    if (!isPandas) return;
+    if (!isPythonExercise) return;
     setPyodideStatus('loading');
     getPyodide()
       .then(() => setPyodideStatus('ready'))
       .catch(() => setPyodideStatus('error'));
-  }, [isPandas]);
+  }, [isPythonExercise]);
+
+  useEffect(() => {
+    if (!exercise) return;
+    setCode(exercise.starterCode);
+    setOutput('');
+    setHintLevel(0);
+    setTestsPassed(null);
+    setShowSolution(false);
+  }, [exercise]);
 
   const loadExercise = (idx: number) => {
-    const ex = exercises[idx]!;
+    const ex = exercises[idx];
+    if (!ex) return;
     setExerciseIdx(idx);
     setCode(ex.starterCode);
     setOutput('');
@@ -64,7 +111,8 @@ export function PracticalLessonView({
   };
 
   const runCode = async () => {
-    if (isPandas && pyodideStatus === 'ready') {
+    if (!exercise) return;
+    if (isPythonExercise && pyodideStatus === 'ready') {
       setOutput(t('loadingPyodide'));
       const run = await runPythonCode(code);
       if (run.error) {
@@ -78,7 +126,8 @@ export function PracticalLessonView({
   };
 
   const runTests = async () => {
-    if (isPandas && pyodideStatus === 'ready') {
+    if (!exercise) return;
+    if (isPythonExercise && pyodideStatus === 'ready') {
       setOutput(t('loadingPyodide'));
       const result = await validatePythonExercise(code, exercise.validate);
       setTestsPassed(result.passed);
@@ -108,21 +157,61 @@ export function PracticalLessonView({
     onClose();
   };
 
-  const lessonTitle = taskTitle ?? 'Pandas GroupBy Operations';
-  const lessonCourse = courseName ? `${courseName} · Practice` : 'Python for Data Science · Practice';
+  const lessonTitle = taskTitle ?? (lang === 'el' ? `Εξάσκηση: ${quizConcept}` : `Practice: ${quizConcept}`);
+  const lessonCourse = courseName ? `${courseName} · Practice` : 'Practice';
   const allDone = completedCount >= exercises.length;
 
-  return (
-    <div className="fixed inset-0 z-50 bg-surface-primary flex flex-col">
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-surface-secondary/50">
-        <div className="flex items-center gap-3">
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-hover"><X className="w-5 h-5 text-text-secondary" /></button>
-          <div>
-            <p className="text-sm font-semibold">{lessonTitle}</p>
-            <p className="text-xs text-text-tertiary">{lessonCourse}</p>
+  if (!hasNoteSource && onUpload) {
+    return (
+      <div className="fixed inset-0 z-50 bg-surface-primary flex flex-col">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-surface-secondary/50">
+          <div className="flex items-center gap-3">
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-hover">
+              <X className="w-5 h-5 text-text-secondary" />
+            </button>
+            <div>
+              <p className="text-sm font-semibold">{lessonTitle}</p>
+              <p className="text-xs text-text-tertiary">{lessonCourse}</p>
+            </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex-1 flex flex-col items-center justify-center p-8 text-center max-w-lg mx-auto">
+          <Upload className="w-12 h-12 text-brand-400 mb-4" />
+          <h2 className="text-lg font-semibold mb-2">
+            {lang === 'el' ? 'Ανέβασε σημειώσεις για εξάσκηση' : 'Upload notes to practice'}
+          </h2>
+          <p className="text-sm text-text-secondary mb-6">
+            {lang === 'el'
+              ? 'Οι ασκήσεις παράγονται από παραδείγματα, τύπους και κώδικα στις δικές σου σημειώσεις — όχι από demo templates.'
+              : 'Exercises are generated from worked examples, formulas, and code in your notes — not demo templates.'}
+          </p>
+          <button
+            type="button"
+            onClick={onUpload}
+            className="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium"
+          >
+            {lang === 'el' ? 'Ανέβασμα υλικού' : 'Upload material'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!exercise) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-surface-primary flex flex-col w-full min-w-0">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-surface-secondary/50">
+        <div className="flex items-center gap-3 min-w-0">
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-hover shrink-0">
+            <X className="w-5 h-5 text-text-secondary" />
+          </button>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold truncate">{lessonTitle}</p>
+            <p className="text-xs text-text-tertiary truncate">{lessonCourse}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
           <button onClick={onOpenAgent} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border-subtle hover:border-brand-500/30 transition-all">
             <Sparkles className="w-3.5 h-3.5 text-brand-400" /> Ask Agent
           </button>
@@ -130,14 +219,16 @@ export function PracticalLessonView({
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        <div className="lg:w-[40%] border-b lg:border-b-0 lg:border-r border-border-subtle overflow-y-auto">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-w-0">
+        <div className="lg:w-[40%] border-b lg:border-b-0 lg:border-r border-border-subtle overflow-y-auto min-w-0">
           <div className="p-5 space-y-5">
             <div>
-              <span className="text-xs text-accent-teal font-medium uppercase tracking-wider">Interactive Exercise</span>
+              <span className="text-xs text-accent-teal font-medium uppercase tracking-wider">
+                {hasNoteSource ? (lang === 'el' ? 'Από τις σημειώσεις σου' : 'From your notes') : 'Exercise'}
+              </span>
               <h2 className="text-xl font-bold mt-1">{exercise.title}</h2>
               <p className="text-[10px] text-text-muted mt-1">{t('exercise')} {exerciseIdx + 1} {t('of')} {exercises.length}</p>
-              {isPandas && (
+              {isPythonExercise && (
                 <p className="text-[10px] text-brand-400 mt-0.5">
                   {pyodideStatus === 'loading' && t('loadingPyodide')}
                   {pyodideStatus === 'ready' && t('pyodideReady')}
@@ -203,7 +294,7 @@ export function PracticalLessonView({
           </div>
         </div>
 
-        <div className="lg:w-[60%] flex flex-col">
+        <div className="lg:w-[60%] flex flex-col min-w-0">
           <div className="flex items-center justify-between px-4 py-2 border-b border-border-subtle bg-surface-secondary/30">
             <div className="flex items-center gap-2">
               <Terminal className="w-4 h-4 text-text-tertiary" />
@@ -223,11 +314,9 @@ export function PracticalLessonView({
           </div>
 
           <div className="flex-1 min-h-[200px]">
-            <textarea
+            <CodeEditor
               value={code}
-              onChange={(e) => { setCode(e.target.value); setTestsPassed(null); }}
-              className="w-full h-full p-4 bg-[#0d0b14] text-sm font-mono text-accent-emerald focus:outline-none resize-none leading-relaxed"
-              spellCheck={false}
+              onChange={(val) => { setCode(val); setTestsPassed(null); }}
             />
           </div>
 
@@ -250,8 +339,8 @@ export function PracticalLessonView({
         </div>
       </div>
 
-      <div className="border-t border-border-subtle bg-surface-secondary/50 px-4 py-3">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+      <div className="border-t border-border-subtle bg-surface-secondary/50 px-4 py-3 w-full min-w-0">
+        <div className="w-full flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="text-xs text-text-muted">{completedCount}/{exercises.length} completed</span>
             {testsPassed && <span className="text-xs text-accent-emerald flex items-center gap-1"><Zap className="w-3 h-3" /> Exercise passed</span>}

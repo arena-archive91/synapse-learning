@@ -6,9 +6,14 @@ import {
   RotateCcw, Target, PenTool, Smile, Search, FileText,
   HelpCircle, Zap, Settings2
 } from 'lucide-react';
-import type { AgentMessage, AgentMode, Course, UserSettings } from '../types';
+import type { AgentMessage, AgentMode, Course, UserSettings, UploadedFile, MessageCitation } from '../types';
 import { cn } from '../utils/cn';
 import { streamAgentReply, isLlmAvailable } from '../lib/llmClient';
+import { buildSourceExcerpt, retrieveForQueryHybrid } from '../lib/sourceContext';
+import { spanFromCitation } from '../lib/conceptProvenance';
+import { formatCitation } from '../lib/rag';
+import { GoToSourceButton } from './GoToSourceButton';
+import { RichText } from './RichText';
 
 interface AgentProps {
   messages: AgentMessage[];
@@ -22,6 +27,9 @@ interface AgentProps {
   xpReward?: number;
   onCompleteTask?: () => void;
   settings?: UserSettings;
+  uploadedFiles?: UploadedFile[];
+  onGoToSource?: (highlight: { fileId: string; charStart: number; charEnd: number }) => void;
+  lang?: 'en' | 'el';
 }
 
 const agentModes: { mode: AgentMode; icon: typeof Brain; label: string; desc: string; color: string }[] = [
@@ -63,15 +71,26 @@ export function Agent({
   xpReward,
   onCompleteTask,
   settings,
+  uploadedFiles = [],
+  onGoToSource,
+  lang = settings?.language ?? 'en',
 }: AgentProps) {
   const [input, setInput] = useState('');
   const [showModes, setShowModes] = useState(false);
   const [showQuickActions, setShowQuickActions] = useState(true);
   const [selectedSource, setSelectedSource] = useState<string>('all');
+  const [attachSource, setAttachSource] = useState(true);
   const [isThinking, setIsThinking] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const llmReady = isLlmAvailable(settings);
+  const sourceExcerpt = attachSource
+    ? buildSourceExcerpt(
+        uploadedFiles,
+        activeTaskConcept,
+        selectedSource === 'all' ? undefined : selectedSource,
+      )
+    : undefined;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -92,6 +111,17 @@ export function Agent({
     setShowQuickActions(false);
     setIsThinking(true);
 
+    // Query-aware retrieval: rank source chunks against the actual message
+    // (widened by the active concept) for grounding + precise citations.
+    const retrieval = attachSource
+      ? await retrieveForQueryHybrid(uploadedFiles, text, settings, {
+          concept: activeTaskConcept,
+          courseId: selectedSource === 'all' ? undefined : selectedSource,
+        })
+      : { excerpt: undefined, citations: [], grounded: false };
+
+    const queryExcerpt = retrieval.excerpt ?? sourceExcerpt;
+
     const streamId = `msg-${Date.now() + 1}`;
     onSendMessage({
       id: streamId,
@@ -101,7 +131,7 @@ export function Agent({
       type: 'text',
       isStreaming: true,
       metadata: {
-        sourceGrounded: mode !== 'motivation',
+        sourceGrounded: retrieval.grounded || (mode !== 'motivation' && !!queryExcerpt),
         enrichmentUsed: false,
         inferenceUsed: llmReady,
       },
@@ -109,7 +139,7 @@ export function Agent({
 
     setIsThinking(false);
 
-    const { content, usedLlm } = await streamAgentReply(
+    const { content, usedLlm, sourceGrounded } = await streamAgentReply(
       text,
       mode,
       settings,
@@ -117,16 +147,23 @@ export function Agent({
         taskTitle: activeTaskTitle,
         concept: activeTaskConcept,
         courses: courses.map((c) => c.title),
+        sourceExcerpt: queryExcerpt,
       },
       (full) => onUpdateMessage(streamId, { content: full }),
     );
 
+    const citationLine = retrieval.citations.length > 0
+      ? retrieval.citations.slice(0, 3).map(formatCitation).join('  ·  ')
+      : undefined;
+
     onUpdateMessage(streamId, {
       content,
       isStreaming: false,
+      sourceReference: citationLine,
+      citations: retrieval.citations,
       metadata: {
-        sourceGrounded: mode !== 'motivation',
-        enrichmentUsed: false,
+        sourceGrounded: retrieval.grounded || sourceGrounded || (mode !== 'motivation' && !!queryExcerpt),
+        enrichmentUsed: settings?.sourceMode === 'enriched' && !retrieval.grounded,
         inferenceUsed: usedLlm,
       },
     });
@@ -143,7 +180,7 @@ export function Agent({
     <div className="flex flex-col h-[calc(100vh-56px)] lg:h-[calc(100vh-56px)]">
       {/* Agent Header */}
       <div className="px-4 sm:px-6 py-3 border-b border-border-subtle bg-surface-secondary/30">
-        <div className="flex items-center justify-between max-w-4xl mx-auto">
+        <div className="flex items-center justify-between max-w-none w-full min-w-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-accent-teal flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-white" />
@@ -162,6 +199,7 @@ export function Agent({
               </div>
               <p className="text-xs text-text-tertiary">
                 {llmReady ? 'LLM connected · streaming' : 'Offline mode · Add API key in Settings'}
+                {sourceExcerpt ? ' · source context attached' : ''}
               </p>
             </div>
           </div>
@@ -186,7 +224,7 @@ export function Agent({
 
       {activeTaskTitle && (
         <div className="px-4 sm:px-6 py-2 border-b border-brand-500/20 bg-brand-500/5">
-          <div className="max-w-4xl mx-auto flex items-center justify-between gap-3 flex-wrap">
+          <div className="max-w-none w-full min-w-0 flex items-center justify-between gap-3 flex-wrap">
             <div className="min-w-0">
               <p className="text-xs font-semibold text-brand-300 truncate">{activeTaskTitle}</p>
               {activeTaskConcept && (
@@ -219,7 +257,7 @@ export function Agent({
             exit={{ opacity: 0, height: 0 }}
             className="border-b border-border-subtle bg-surface-secondary/50 overflow-hidden"
           >
-            <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4">
+            <div className="max-w-none w-full min-w-0 px-4 sm:px-6 py-4">
               <p className="text-xs text-text-tertiary font-medium uppercase tracking-wider mb-3">Agent Mode</p>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
                 {agentModes.map(m => (
@@ -246,9 +284,9 @@ export function Agent({
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 space-y-4">
+        <div className="max-w-none w-full min-w-0 px-4 sm:px-6 py-4 space-y-4">
           {messages.map(msg => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble key={msg.id} message={msg} onGoToSource={onGoToSource} lang={lang} />
           ))}
           {isThinking && (
             <div className="flex gap-3 px-1 py-2 text-sm text-text-muted">
@@ -284,7 +322,7 @@ export function Agent({
 
       {/* Input Area */}
       <div className="border-t border-border-subtle bg-surface-secondary/30 pb-20 lg:pb-0">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-3">
+        <div className="max-w-none w-full min-w-0 px-4 sm:px-6 py-3">
           <div className="flex items-end gap-2">
             <div className="flex-1 relative">
               <textarea
@@ -339,8 +377,15 @@ export function Agent({
                 🛡️ Don't give me the answer
               </button>
               <span>•</span>
-              <button className="text-text-muted hover:text-text-secondary transition-colors">
-                📎 Attach source context
+              <button
+                type="button"
+                onClick={() => setAttachSource((v) => !v)}
+                className={cn(
+                  'text-text-muted hover:text-text-secondary transition-colors',
+                  attachSource && sourceExcerpt && 'text-brand-400',
+                )}
+              >
+                📎 {attachSource ? 'Source context on' : 'Source context off'}
               </button>
             </div>
             <span className="text-[10px] text-text-muted">Shift+Enter for new line</span>
@@ -351,7 +396,60 @@ export function Agent({
   );
 }
 
-function MessageBubble({ message }: { message: AgentMessage }) {
+function CitationList({
+  citations,
+  onGoToSource,
+  lang = 'en',
+}: {
+  citations: MessageCitation[];
+  onGoToSource?: (highlight: { fileId: string; charStart: number; charEnd: number }) => void;
+  lang?: 'en' | 'el';
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2 pt-2 border-t border-border-subtle">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-text-tertiary hover:text-brand-300 transition-colors"
+      >
+        <FileText className="w-3 h-3" />
+        {citations.length} {citations.length === 1 ? 'source' : 'sources'} · show me where this came from
+        <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1.5">
+          {citations.map((c) => (
+            <div key={c.chunkId} className="rounded-lg border border-border-subtle bg-surface-primary/40 px-2.5 py-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[10px] text-brand-300 font-medium min-w-0">
+                  <FileText className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{c.fileName}</span>
+                  <span className="text-text-muted">· {c.locator}</span>
+                  {c.heading && <span className="text-text-muted truncate">· {c.heading}</span>}
+                </div>
+                {onGoToSource && (
+                  <GoToSourceButton lang={lang} onClick={() => onGoToSource(spanFromCitation(c))} />
+                )}
+              </div>
+              <p className="text-[11px] text-text-tertiary mt-0.5 leading-snug">{c.snippet}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  onGoToSource,
+  lang = 'en',
+}: {
+  message: AgentMessage;
+  onGoToSource?: (highlight: { fileId: string; charStart: number; charEnd: number }) => void;
+  lang?: 'en' | 'el';
+}) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
@@ -383,19 +481,20 @@ function MessageBubble({ message }: { message: AgentMessage }) {
           ? 'bg-brand-600 text-white rounded-tr-md'
           : 'bg-surface-card border border-border-subtle rounded-tl-md'
       )}>
-        <div className="whitespace-pre-wrap">
-          {(message.content || (message.isStreaming ? '…' : '')).split(/(\*\*[^*]+\*\*)/).map((part, i) => {
-            if (part.startsWith('**') && part.endsWith('**')) {
-              return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
-            }
-            return <span key={i}>{part}</span>;
-          })}
+        <div>
+          {isUser ? (
+            <div className="whitespace-pre-wrap">{message.content}</div>
+          ) : (
+            <RichText text={message.content || (message.isStreaming ? '…' : '')} />
+          )}
           {message.isStreaming && message.content && (
             <span className="inline-block w-0.5 h-4 bg-brand-400 animate-pulse ml-0.5 align-middle" />
           )}
         </div>
 
-        {message.sourceReference && (
+        {message.citations && message.citations.length > 0 ? (
+          <CitationList citations={message.citations} onGoToSource={onGoToSource} lang={lang} />
+        ) : message.sourceReference ? (
           <div className={cn(
             'mt-2 pt-2 border-t flex items-center gap-1.5 text-xs',
             isUser ? 'border-white/20 text-white/70' : 'border-border-subtle text-text-tertiary'
@@ -403,7 +502,7 @@ function MessageBubble({ message }: { message: AgentMessage }) {
             <FileText className="w-3 h-3" />
             {message.sourceReference}
           </div>
-        )}
+        ) : null}
 
         {message.confidence !== undefined && message.confidence < 0.8 && (
           <div className="mt-1.5 flex items-center gap-1 text-xs text-accent-amber">

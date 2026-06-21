@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useI18n } from '../../lib/i18n';
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 interface DragNode {
   id: string;
@@ -22,6 +23,8 @@ interface Props {
   initialNodes: DragNode[];
   initialEdges: DragEdge[];
   onNodeUpdate?: (nodes: DragNode[]) => void;
+  emptyMessage?: string;
+  onUpload?: () => void;
 }
 
 const MASTERY_COLOR = (m: number) =>
@@ -29,7 +32,7 @@ const MASTERY_COLOR = (m: number) =>
 
 const TYPE_EMOJI: Record<string, string> = { concept: '💡', formula: '📐', definition: '📖', theory: '🧠' };
 
-export function DraggableConceptMap({ initialNodes, initialEdges, onNodeUpdate }: Props) {
+export function DraggableConceptMap({ initialNodes, initialEdges, onNodeUpdate, emptyMessage, onUpload }: Props) {
   const { t } = useI18n();
   const [nodes, setNodes] = useState<DragNode[]>(initialNodes);
   const [edges] = useState<DragEdge[]>(initialEdges);
@@ -84,7 +87,6 @@ export function DraggableConceptMap({ initialNodes, initialEdges, onNodeUpdate }
 
   const handlePointerUp = useCallback(() => {
     if (dragging.current) {
-      const id = dragging.current;
       dragging.current = null;
       setNodes((prev) => {
         onNodeUpdate?.(prev);
@@ -121,6 +123,15 @@ export function DraggableConceptMap({ initialNodes, initialEdges, onNodeUpdate }
   useEffect(() => { setNodes(initialNodes); }, [initialNodes]);
 
   const selectedNode = selected ? nodeMap[selected] : null;
+
+  if (initialNodes.length === 0) {
+    return (
+      <WorkspaceEmptyState
+        message={emptyMessage ?? 'Upload notes to build a concept map from your course topics and glossary.'}
+        onUpload={onUpload}
+      />
+    );
+  }
 
   return (
     <div className="relative rounded-2xl border border-border-subtle bg-surface-card overflow-hidden flex flex-col h-full">

@@ -19,11 +19,11 @@ export function saveAnnotations(fileKey: string, items: StoredAnnotation[]): voi
 
 export function pickSourceText(
   uploadedFiles: { name: string; extractedText?: string }[],
-  fallback: string,
+  fallback = '',
 ): { text: string; name: string; fileKey: string } {
   const withText = uploadedFiles.find((f) => f.extractedText && f.extractedText.trim().length > 50);
   if (withText?.extractedText) {
     return { text: withText.extractedText, name: withText.name, fileKey: withText.name };
   }
-  return { text: fallback, name: 'Lecture_Notes_Micro.pdf', fileKey: 'default-source' };
+  return { text: fallback, name: '', fileKey: 'no-source' };
 }

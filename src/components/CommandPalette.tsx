@@ -60,9 +60,9 @@ export function CommandPalette({ open, onClose, tasks, onNavigate, onStartTask, 
     .map((t) => ({ type: 'task', taskId: t.id, label: t.title, icon: Play }));
 
   const sessionActions: CommandAction[] = [
-    { type: 'session', session: '10min' as const, label: 'Start Quick Sprint (10 min)', icon: Play },
-    { type: 'session', session: '25min' as const, label: 'Start Focused Session (25 min)', icon: Play },
-    { type: 'session', session: 'review' as const, label: 'Start Spaced Review', icon: Play },
+    { type: 'session' as const, session: '10min' as const, label: 'Start Quick Sprint (10 min)', icon: Play },
+    { type: 'session' as const, session: '25min' as const, label: 'Start Focused Session (25 min)', icon: Play },
+    { type: 'session' as const, session: 'review' as const, label: 'Start Spaced Review', icon: Play },
   ].filter((s) => s.label.toLowerCase().includes(q));
 
   const actions = [...navActions, ...taskActions, ...sessionActions];

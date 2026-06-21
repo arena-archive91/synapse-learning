@@ -1,9 +1,11 @@
 import { motion } from 'framer-motion';
-import { BookOpen, CheckCircle2, Brain, Zap, RotateCcw, AlertTriangle, Star, Target } from 'lucide-react';
-import type { ActivityItem } from '../../types';
+import { BookOpen, CheckCircle2, Brain, Zap, RotateCcw, AlertTriangle, Star, Target, Clock, Upload, Activity } from 'lucide-react';
+import type { ActivityItem, ActivityType } from '../../types';
 import { formatRelativeTime } from '../../lib/activityLog';
 
-const typeConfig = {
+type ActivityVisual = { icon: typeof BookOpen; color: string; bg: string };
+
+const typeConfig: Record<ActivityType, ActivityVisual> = {
   lesson_complete: { icon: BookOpen, color: 'text-brand-400', bg: 'bg-brand-500/10' },
   quiz_passed: { icon: CheckCircle2, color: 'text-accent-emerald', bg: 'bg-accent-emerald/10' },
   quiz_failed: { icon: AlertTriangle, color: 'text-accent-rose', bg: 'bg-accent-rose/10' },
@@ -13,7 +15,11 @@ const typeConfig = {
   xp_earned: { icon: Zap, color: 'text-brand-300', bg: 'bg-brand-500/10' },
   mistake_fixed: { icon: Target, color: 'text-accent-emerald', bg: 'bg-accent-emerald/10' },
   task_complete: { icon: CheckCircle2, color: 'text-accent-emerald', bg: 'bg-accent-emerald/10' },
+  study_time: { icon: Clock, color: 'text-accent-cyan', bg: 'bg-accent-cyan/10' },
+  upload: { icon: Upload, color: 'text-brand-300', bg: 'bg-brand-500/10' },
 };
+
+const FALLBACK_VISUAL: ActivityVisual = { icon: Activity, color: 'text-text-secondary', bg: 'bg-surface-hover' };
 
 interface Props {
   activities: ActivityItem[];
@@ -28,7 +34,7 @@ export function ActivityFeed({ activities, maxItems = 6 }: Props) {
   return (
     <div className="space-y-1">
       {activities.slice(0, maxItems).map((item, i) => {
-        const config = typeConfig[item.type];
+        const config = typeConfig[item.type] ?? FALLBACK_VISUAL;
         const Icon = config.icon;
         return (
           <motion.div

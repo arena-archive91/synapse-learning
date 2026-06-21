@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { GitCommit, Plus, Pencil } from 'lucide-react';
-import { loadJson, saveJson } from '../../lib/persistence';
+import { saveJson } from '../../lib/persistence';
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 export type ArgNodeType = 'claim' | 'premise' | 'support' | 'refutation';
 
@@ -29,40 +30,6 @@ const TYPE_LABELS: Record<ArgNodeType, string> = {
   refutation: 'Refutation',
 };
 
-export const DEBATE_TREE: ArgNode = {
-  id: 'root',
-  type: 'claim',
-  text: 'Bertrand competition yields competitive pricing with just two firms',
-  x: 300,
-  y: 50,
-  expanded: true,
-  children: [
-    {
-      id: 'p1',
-      type: 'premise',
-      text: 'Firms undercut each other until price equals marginal cost',
-      x: 150,
-      y: 150,
-      expanded: true,
-      children: [
-        { id: 's1', type: 'support', text: 'Homogeneous goods → consumers buy cheapest', x: 50, y: 250 },
-        { id: 'r1', type: 'refutation', text: 'Capacity constraints prevent full undercutting', x: 250, y: 250 },
-      ],
-    },
-    {
-      id: 'p2',
-      type: 'premise',
-      text: 'Cournot retains market power because firms choose quantity',
-      x: 450,
-      y: 150,
-      expanded: true,
-      children: [
-        { id: 'r2', type: 'refutation', text: 'Cournot also converges to competition with many firms', x: 450, y: 250 },
-      ],
-    },
-  ],
-};
-
 function updateNodeText(node: ArgNode, id: string, text: string): ArgNode {
   if (node.id === id) return { ...node, text };
   if (!node.children) return node;
@@ -78,20 +45,35 @@ function addChild(node: ArgNode, parentId: string, child: ArgNode): ArgNode {
 }
 
 interface Props {
-  tree?: ArgNode;
+  tree?: ArgNode | null;
   storageKey?: string;
   concept?: string;
+  emptyMessage?: string;
+  onUpload?: () => void;
 }
 
-export function ArgumentMap({ tree = DEBATE_TREE, storageKey = 'debate-tree', concept }: Props) {
-  const [root, setRoot] = useState<ArgNode>(() => loadJson(storageKey, tree));
+export function ArgumentMap({ tree, storageKey = 'debate-tree', concept, emptyMessage, onUpload }: Props) {
+  const [root, setRoot] = useState<ArgNode | null>(tree ?? null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+
+  useEffect(() => {
+    setRoot(tree ?? null);
+  }, [tree]);
 
   const persist = (next: ArgNode) => {
     setRoot(next);
     saveJson(storageKey, next);
   };
+
+  if (!root) {
+    return (
+      <WorkspaceEmptyState
+        message={emptyMessage ?? 'Upload notes to build a debate tree from claims in your material.'}
+        onUpload={onUpload}
+      />
+    );
+  }
 
   const startEdit = (node: ArgNode) => {
     setEditingId(node.id);

@@ -1,4 +1,5 @@
 import type { AgentMode, UserSettings } from '../types';
+import { t as ti18n, type I18nKey } from './i18n';
 
 /** Map user teaching preferences → default agent mode */
 export function settingsToAgentMode(settings: UserSettings): AgentMode {
@@ -30,9 +31,6 @@ export function agentTonePrefix(settings: UserSettings): string {
   if (settings.feedbackTone === 'strict') return 'Be precise — ';
   return '';
 }
-
-import type { UserSettings } from '../types';
-import { t as ti18n, type I18nKey } from './i18n';
 
 /** @deprecated use i18n.ts directly */
 export function t(key: string, lang: UserSettings['language']): string {

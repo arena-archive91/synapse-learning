@@ -1,4 +1,28 @@
-import type { User, Course, Task, LearnerModel, DashboardStats, AgentMessage, UserSettings } from '../types';
+import type { User, Course, Task, LearnerModel, DashboardStats, AgentMessage, MistakeRecord, UserSettings } from '../types';
+
+/** Demo mistake notebook entries — only loaded when `showDemoContent` is true. */
+export const DEMO_INITIAL_MISTAKES: MistakeRecord[] = [
+  {
+    id: 'mistake-1',
+    concept: 'Elasticity Calculations',
+    questionSummary: 'Price elasticity when price rises 10% and quantity falls 15%',
+    wrongAnswer: 'Used absolute change instead of percentage',
+    correctAnswer: 'PED = -15% / 10% = -1.5',
+    courseId: 'c1',
+    createdAt: '2026-01-10',
+    resolved: false,
+  },
+  {
+    id: 'mistake-2',
+    concept: 'Consumer Surplus',
+    questionSummary: 'Area under demand curve above market price',
+    wrongAnswer: 'Included producer surplus region',
+    correctAnswer: 'Only triangle between demand curve and price line',
+    courseId: 'c1',
+    createdAt: '2026-01-09',
+    resolved: false,
+  },
+];
 
 const defaultSettings: UserSettings = {
   questionFrequency: 'moderate',
@@ -21,6 +45,7 @@ const defaultSettings: UserSettings = {
   examDate: '2026-02-20',
   useLlm: true,
   llmModel: 'gpt-4o-mini',
+  showDemoContent: false,
 };
 
 export const mockUser: User = {
@@ -181,7 +206,7 @@ export const mockLearnerModel: LearnerModel = {
 
 export const mockDashboardStats: DashboardStats = {
   todayXP: 120, weeklyXP: 680, streak: 12, tasksToday: 8, tasksCompleted: 1,
-  reviewsDue: 3, weakConcepts: 4, upcomingExams: 1, studyTimeToday: 35,
+  reviewsDue: 3, weakConcepts: 4, upcomingExams: 1, studyTimeToday: 35, studyTimeWeek: 210,
   masteryTrend: [42, 45, 48, 50, 52, 55, 58], conceptsMastered: 31, totalConcepts: 136,
   antiPassiveAlert: false,
 };

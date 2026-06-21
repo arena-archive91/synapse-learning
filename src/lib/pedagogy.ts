@@ -143,7 +143,7 @@ export function computeReviewInterval(
   return Math.max(1, Math.round(base * confMod));
 }
 
-export function updateSkillMastery(skill: SkillNode, correct: boolean, confidence: number): SkillNode {
+export function updateSkillMastery(skill: SkillNode, correct: boolean, _confidence: number): SkillNode {
   const delta = correct ? Math.min(12, 100 - skill.mastery) : -Math.min(15, skill.mastery);
   const mastery = Math.max(0, Math.min(100, skill.mastery + delta));
   return {

@@ -2,37 +2,67 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, RotateCcw, Copy, Check } from 'lucide-react';
 import { cn } from '../../utils/cn';
-import { loadJson, saveJson } from '../../lib/persistence';
+import { inferVariablesFromFormula, evaluateFormulaExpression, type FormulaVariable } from '../../lib/formulaSolver';
+import { loadScratchpadFormulas, saveScratchpadFormulas } from '../../lib/workspacePersistence';
+import { WorkspaceEmptyState } from './WorkspaceEmptyState';
 
 interface Variable { symbol: string; value: string; unit: string }
 interface SavedFormula { id: string; name: string; formula: string; variables: Variable[] }
+interface PersistedScratch {
+  formulas: SavedFormula[];
+  vars: Variable[];
+  steps: string[];
+  active: string;
+}
 
-const PRESET_FORMULAS: SavedFormula[] = [
-  { id: 'f1', name: 'Price Elasticity', formula: 'Eₚ = (%ΔQᵈ) / (%ΔP)', variables: [
-    { symbol: '%ΔQᵈ', value: '', unit: '%' }, { symbol: '%ΔP', value: '', unit: '%' }
-  ]},
-  { id: 'f2', name: 'Cournot Best Response', formula: 'q₁* = (a − c − q₂) / 2b', variables: [
-    { symbol: 'a', value: '100', unit: '$/u' }, { symbol: 'c', value: '10', unit: '$/u' },
-    { symbol: 'q₂', value: '30', unit: 'u' }, { symbol: 'b', value: '1', unit: '' },
-  ]},
-  { id: 'f3', name: 'Consumer Surplus', formula: 'CS = ½ × (Pmax − P*) × Q*', variables: [
-    { symbol: 'Pmax', value: '', unit: '$' }, { symbol: 'P*', value: '', unit: '$' }, { symbol: 'Q*', value: '', unit: 'u' },
-  ]},
-  { id: 'f4', name: 'Profit Maximisation', formula: 'π = TR − TC = P×Q − TC(Q)', variables: [
-    { symbol: 'P', value: '', unit: '$' }, { symbol: 'Q', value: '', unit: 'u' }, { symbol: 'TC', value: '', unit: '$' },
-  ]},
-];
+interface NoteFormula {
+  id: string;
+  name: string;
+  formula: string;
+}
 
-export function FormulaScratchpad() {
-  const [formulas, setFormulas] = useState<SavedFormula[]>(() => loadJson('scratchpad-formulas', PRESET_FORMULAS));
-  const [active, setActive] = useState<string>('f2');
-  const [vars, setVars] = useState<Variable[]>(() => loadJson('scratchpad-vars', PRESET_FORMULAS[1].variables));
-  const [steps, setSteps] = useState<string[]>(() => loadJson('scratchpad-steps', []));
+interface Props {
+  noteFormulas?: NoteFormula[];
+  emptyMessage?: string;
+  onUpload?: () => void;
+  /** Workspace/task identifier used to scope persistence (avoids cross-task bleed). */
+  scopeKey?: string;
+}
+
+export function FormulaScratchpad({ noteFormulas = [], emptyMessage, onUpload, scopeKey }: Props) {
+  const scope = scopeKey ?? '__global';
+  const persisted = loadScratchpadFormulas<PersistedScratch>(scope);
+  const initialFormulas: SavedFormula[] = noteFormulas.map((f) => ({
+    ...f,
+    variables: inferVariablesFromFormula(f.formula),
+  }));
+  const [formulas, setFormulas] = useState<SavedFormula[]>(() =>
+    initialFormulas.length > 0 ? initialFormulas : (persisted?.formulas ?? []),
+  );
+  const [active, setActive] = useState<string>(() => initialFormulas[0]?.id ?? persisted?.active ?? '');
+  const [vars, setVars] = useState<Variable[]>(() =>
+    initialFormulas[0]?.variables ?? persisted?.vars ?? [{ symbol: 'x', value: '', unit: '' }],
+  );
+  const [steps, setSteps] = useState<string[]>(() => persisted?.steps ?? []);
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => { saveJson('scratchpad-formulas', formulas); }, [formulas]);
-  useEffect(() => { saveJson('scratchpad-vars', vars); }, [vars]);
-  useEffect(() => { saveJson('scratchpad-steps', steps); }, [steps]);
+  useEffect(() => {
+    saveScratchpadFormulas<PersistedScratch>(scope, { formulas, vars, steps, active });
+  }, [scope, formulas, vars, steps, active]);
+
+  useEffect(() => {
+    if (noteFormulas.length === 0) return;
+    const mapped: SavedFormula[] = noteFormulas.map((f) => ({
+      ...f,
+      variables: inferVariablesFromFormula(f.formula),
+    }));
+    setFormulas(mapped);
+    if (mapped[0]) {
+      setActive(mapped[0].id);
+      setVars([...mapped[0].variables]);
+      setSteps([]);
+    }
+  }, [noteFormulas]);
 
   const activeFormula = formulas.find(f => f.id === active);
 
@@ -47,61 +77,8 @@ export function FormulaScratchpad() {
 
   const compute = () => {
     if (!activeFormula) return;
-    const filled = vars.filter(v => v.value !== '');
-    if (filled.length < vars.length) { setSteps(['⚠ Fill in all variables first.']); return; }
-
-    if (active === 'f2') {
-      const a = parseFloat(vars[0].value), c = parseFloat(vars[1].value);
-      const q2 = parseFloat(vars[2].value), b = parseFloat(vars[3].value);
-      if ([a, c, q2, b].some(isNaN)) { setSteps(['⚠ Invalid numbers.']); return; }
-      const num = a - c - q2;
-      const denom = 2 * b;
-      const result = num / denom;
-      setSteps([
-        `Step 1: Substitute values into ${activeFormula.formula}`,
-        `Step 2: q₁* = (${a} − ${c} − ${q2}) / (2 × ${b})`,
-        `Step 3: q₁* = ${num} / ${denom}`,
-        `Step 4: q₁* = ${result.toFixed(2)} units`,
-        `✓ The optimal quantity for Firm 1 is ${result.toFixed(2)} units.`,
-      ]);
-    } else if (active === 'f1') {
-      const dq = parseFloat(vars[0].value), dp = parseFloat(vars[1].value);
-      if ([dq, dp].some(isNaN) || dp === 0) { setSteps(['⚠ Invalid input.']); return; }
-      const e = dq / dp;
-      const desc = Math.abs(e) > 1 ? 'elastic' : Math.abs(e) === 1 ? 'unit elastic' : 'inelastic';
-      setSteps([
-        `Step 1: Eₚ = ${dq}% / ${dp}%`,
-        `Step 2: Eₚ = ${e.toFixed(2)}`,
-        `Step 3: |Eₚ| = ${Math.abs(e).toFixed(2)} → demand is ${desc}`,
-        `✓ Price elasticity is ${e.toFixed(2)} (${desc}).`,
-      ]);
-    } else if (active === 'f3') {
-      const pmax = parseFloat(vars[0].value), pStar = parseFloat(vars[1].value), qStar = parseFloat(vars[2].value);
-      if ([pmax, pStar, qStar].some(isNaN)) { setSteps(['⚠ Invalid numbers.']); return; }
-      const cs = 0.5 * (pmax - pStar) * qStar;
-      setSteps([
-        `Step 1: CS = ½ × (Pmax − P*) × Q*`,
-        `Step 2: CS = ½ × (${pmax} − ${pStar}) × ${qStar}`,
-        `Step 3: CS = ½ × ${(pmax - pStar).toFixed(2)} × ${qStar}`,
-        `Step 4: CS = ${cs.toFixed(2)}`,
-        `✓ Consumer surplus is ${cs.toFixed(2)}.`,
-      ]);
-    } else if (active === 'f4') {
-      const p = parseFloat(vars[0].value), q = parseFloat(vars[1].value), tc = parseFloat(vars[2].value);
-      if ([p, q, tc].some(isNaN)) { setSteps(['⚠ Invalid numbers.']); return; }
-      const tr = p * q;
-      const profit = tr - tc;
-      setSteps([
-        `Step 1: TR = P × Q = ${p} × ${q} = ${tr.toFixed(2)}`,
-        `Step 2: π = TR − TC = ${tr.toFixed(2)} − ${tc}`,
-        `Step 3: π = ${profit.toFixed(2)}`,
-        profit >= 0
-          ? `✓ Profit is ${profit.toFixed(2)} (positive).`
-          : `✓ Loss of ${Math.abs(profit).toFixed(2)} (negative profit).`,
-      ]);
-    } else {
-      setSteps([`Substituting values into ${activeFormula.formula}…`, '✓ Computation complete (full solver coming soon).']);
-    }
+    const { steps } = evaluateFormulaExpression(activeFormula.formula, vars as FormulaVariable[]);
+    setSteps(steps);
   };
 
   const copyResult = () => {
@@ -118,6 +95,15 @@ export function FormulaScratchpad() {
     setFormulas(prev => [...prev, f]);
     selectFormula(id);
   };
+
+  if (formulas.length === 0) {
+    return (
+      <WorkspaceEmptyState
+        message={emptyMessage ?? 'Upload notes to extract formulas from your material, or add a custom formula.'}
+        onUpload={onUpload}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col h-full rounded-2xl border border-border-subtle bg-surface-card overflow-hidden">

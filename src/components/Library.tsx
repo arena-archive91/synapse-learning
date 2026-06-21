@@ -44,7 +44,7 @@ export function Library({ courses, uploadedFiles, onSelectCourse, onUpload }: Li
   });
 
   return (
-    <div className="p-4 sm:p-6 pb-24 lg:pb-6 max-w-7xl mx-auto space-y-6">
+    <div className="p-4 sm:p-6 lg:px-8 pb-24 lg:pb-6 w-full min-w-0 space-y-6">
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -57,6 +57,7 @@ export function Library({ courses, uploadedFiles, onSelectCourse, onUpload }: Li
         </div>
         <button
           onClick={onUpload}
+          data-testid="library-upload"
           className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-brand-600 to-brand-500 text-white rounded-xl font-medium text-sm hover:from-brand-500 hover:to-brand-400 transition-all whitespace-nowrap"
         >
           <Upload className="w-4 h-4" />
@@ -186,6 +187,7 @@ function CourseCard({ course, index, onClick }: { course: Course; index: number;
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.05 }}
       onClick={onClick}
+      data-testid="library-course-card"
       className="p-5 rounded-2xl border border-border-subtle bg-surface-card hover:border-brand-500/30 cursor-pointer transition-all group"
     >
       <div className="flex items-start justify-between mb-4">
@@ -202,7 +204,7 @@ function CourseCard({ course, index, onClick }: { course: Course; index: number;
         )}
       </div>
 
-      <h3 className="font-semibold mb-1 group-hover:text-brand-300 transition-colors">{course.title}</h3>
+      <h3 className="font-semibold mb-1 group-hover:text-brand-300 transition-colors" data-testid="library-course-title">{course.title}</h3>
       <p className="text-xs text-text-tertiary mb-4 line-clamp-2">{course.description}</p>
 
       <div className="flex items-center gap-4 text-xs text-text-tertiary mb-3">
